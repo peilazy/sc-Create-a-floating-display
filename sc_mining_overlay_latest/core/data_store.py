@@ -73,7 +73,7 @@ LOCATION_TRANSLATIONS = {
     "Everus Harbor": "永恆港",
     "Grim HEX": "格林 HEX",
     "Crusader corridor": "十字軍航廊",
-    "ArcCorp corridor": "阿克公司航廊",
+    "ArcCorp corridor": "弧光星航廊",
     "Hurston corridor": "赫斯頓航廊",
     "Klescher Rehabilitation Facility": "克雷舍改造設施",
     "The Grove": "樹林區",
@@ -83,8 +83,16 @@ LOCATION_TRANSLATIONS = {
     "HDMO-Dobbs": "HDMO-多布斯",
     "Aaron Halo": "亞倫光環",
     "Aaron Halo Belt": "亞倫光環帶",
+    "C-Type asteroid fields": "C型小行星區",
+    "E-Type asteroid fields": "E型小行星區",
+    "I-Type asteroid fields": "I型小行星區",
+    "M-Type asteroid fields": "M型小行星區",
+    "P-Type asteroid fields": "P型小行星區",
+    "Q-Type asteroid fields": "Q型小行星區",
+    "S-Type asteroid fields": "S型小行星區",
+    "multi-system": "多星系",
     "CRU-L2": "CRU-L2",
-    "ArcCorp": "阿克公司",
+    "ArcCorp": "弧光星",
     "Crusader": "十字軍",
     "Hurston": "赫斯頓",
     "Daymar": "戴瑪",
@@ -106,12 +114,14 @@ class MiningDataStore:
         self._bodies = self._flatten_bodies(self.payload)
         self._by_id = {item["id"]: item for item in self._bodies}
         self._resources_master = self.payload.get("resources_master", [])
+        self._ship_asteroid_profiles = self._build_ship_asteroid_profiles(self.payload)
         self._resource_master_index = self._build_resource_master_index()
         self._blueprints = self.payload.get("blueprints", [])
         self._sccrafter = self._load_sccrafter_index()
         self._scc_items = self._sccrafter.get("items", [])
         self._scc_materials_master = self._sccrafter.get("materials_master", [])
         self._mission_translation_map = self._sccrafter.get("mission_translation_map", {})
+        self._facility_guides = self.payload.get("facility_guides", [])
 
     @staticmethod
     def _load(path: Path) -> dict[str, Any]:
@@ -190,6 +200,19 @@ class MiningDataStore:
         alias_map = {k: list(dict.fromkeys([x for x in v if x])) for k, v in alias_map.items()}
         return mineral_map, alias_map
 
+
+    @staticmethod
+    def _build_ship_asteroid_profiles(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        profiles: dict[str, dict[str, Any]] = {}
+        ref = payload.get("ship_mining_reference") or {}
+        for item in ref.get("asteroid_types", []) or []:
+            type_name = str(item.get("type") or "").strip()
+            if not type_name:
+                continue
+            key = f"{type_name} asteroid fields".lower()
+            profiles[key] = item
+        return profiles
+
     def _build_resource_master_index(self) -> dict[str, dict[str, Any]]:
         idx = {}
         for item in self._resources_master:
@@ -216,7 +239,8 @@ class MiningDataStore:
     def get_body_zh(self, name: str | None) -> str | None:
         if not name:
             return None
-        return self._body_name_map.get(name.strip().lower())
+        key = name.strip().lower()
+        return self._body_name_map.get(key) or LOCATION_TRANSLATIONS.get(str(name).strip())
 
     def translate_resource_name(self, name: str | None) -> str | None:
         if not name:
@@ -349,8 +373,11 @@ class MiningDataStore:
             output = re.sub(rf"\b{re.escape(en)}\b", f"{zh} / {en_disp}", output, flags=re.IGNORECASE)
 
         # dedupe repeated bilingual place names
+        output = re.sub(r"([\u4e00-\u9fff]+)\s+\1\s*/\s*([A-Za-z][A-Za-z0-9 .()\-]+)", r"\1 / \2", output)
+        output = re.sub(r"([\u4e00-\u9fff]+)\s*/\s*\1\s*/\s*([A-Za-z][A-Za-z0-9 .()\-]+)", r"\1 / \2", output)
         output = output.replace("阿伯丁 / 阿伯丁 / Aberdeen", "阿伯丁 / Aberdeen")
         output = output.replace("戴瑪 / 戴瑪 / Daymar", "戴瑪 / Daymar")
+        output = output.replace("利里亞 / 利里亞 / Lyria", "利里亞 / Lyria")
         output = output.replace("赫斯頓 / 赫斯頓 / Hurston", "赫斯頓 / Hurston")
         output = output.replace("史丹頓 / 史丹頓 / Stanton", "史丹頓 / Stanton")
         output = output.replace("阿伯丁 / Aberdeen / 戴瑪 / Daymar", "阿伯丁 / Aberdeen 與 戴瑪 / Daymar")
@@ -358,7 +385,48 @@ class MiningDataStore:
         output = output.replace("，，", "，")
         output = output.replace("to ", "")
         output = output.replace("body.", "區域。")
-        return output
+        return self._dedupe_lines(output)
+
+
+    def _dedupe_lines(self, text: str) -> str:
+        if not text:
+            return "-"
+        seen = set()
+        out = []
+        for raw in str(text).splitlines():
+            line = raw.strip()
+            if not line:
+                if out and out[-1] != "":
+                    out.append("")
+                continue
+            if line in seen:
+                continue
+            seen.add(line)
+            out.append(line)
+        while out and out[0] == "":
+            out.pop(0)
+        while out and out[-1] == "":
+            out.pop()
+        return "\n".join(out) if out else "-"
+
+    def _display_zh(self, name: str | None) -> str | None:
+        key = str(name or "").strip()
+        if not key:
+            return None
+        return self.get_body_zh(key) or self._body_name_map.get(key.lower()) or LOCATION_TRANSLATIONS.get(key) or None
+
+    def _render_known_location_line(self, loc: dict[str, Any]) -> str:
+        body_en = loc.get("body")
+        system_en = loc.get("system")
+        mode = self.normalize_mode(loc.get("mode"))
+        body_disp = self.bilingual_body(body_en, self._display_zh(body_en))
+        system_disp = self.bilingual_body(system_en, self._display_zh(system_en))
+        loc_line = f"- {body_disp}"
+        if system_disp and system_disp != "-":
+            loc_line += f"｜{system_disp}"
+        if mode and mode != "-":
+            loc_line += f"｜{mode}"
+        return loc_line
 
     def normalize_mode(self, mode: str | None) -> str:
         if not mode:
@@ -366,12 +434,65 @@ class MiningDataStore:
         m = str(mode).strip().lower()
         mapping = {
             "ship": "船挖","roc": "ROC","hand": "手挖","cave": "洞穴","surface": "地表",
-            "asteroid": "太空 / 小行星","asteroid_belt": "小行星帶",
+            "asteroid": "太空 / 小行星","asteroid_belt": "小行星帶","ship_generic_asteroid_profile": "通用小行星型譜",
             "cave_exposed_by_hathor_platform_rare": "雷射平台暴露洞穴（稀有）",
             "cave_exposed_by_hathor_platform": "雷射平台暴露洞穴",
             "collection_contract": "收集合約","delivery": "送貨任務","mercenary": "傭兵任務",
         }
         return mapping.get(m, str(mode))
+
+    def normalize_profile_level(self, value: str | None) -> str:
+        if value is None:
+            return "待補"
+        mapping = {
+            "low": "低",
+            "medium": "中",
+            "medium_to_high": "中偏高",
+            "high": "高",
+            "unknown": "待補",
+        }
+        return mapping.get(str(value).strip().lower(), str(value))
+
+    def is_generic_asteroid_field(self, name: str | None) -> bool:
+        raw = str(name or "").strip().lower()
+        return raw in self._ship_asteroid_profiles
+
+    def get_generic_asteroid_profile(self, name: str | None) -> dict[str, Any] | None:
+        raw = str(name or "").strip().lower()
+        return self._ship_asteroid_profiles.get(raw)
+
+    def generic_asteroid_profile_text(self, name: str | None) -> str:
+        profile = self.get_generic_asteroid_profile(name)
+        title = self.bilingual_location_name(name)
+        lines = [f"【{title}】", "類型：通用小行星成分類型", "所屬：多星系 / multi-system", "採集模式：通用小行星型譜"]
+        if not profile:
+            lines.append("")
+            lines.append("說明：")
+            lines.append("此項目是小行星成分類型，不是固定航點或唯一地點。")
+            return "\n".join(lines)
+        lines.append("")
+        lines.append("說明：")
+        lines.append("此項目是小行星成分類型，不是固定地名；代表該資源常見於此類型小行星。")
+        typical = profile.get("typical") or []
+        trace = profile.get("trace") or []
+        if typical:
+            lines.append("")
+            lines.append("典型礦物：")
+            for x in typical:
+                lines.append(f"- {self.bilingual_resource(x, self.translate_resource_name(x))}")
+        if trace:
+            lines.append("")
+            lines.append("稀有／伴生礦物：")
+            for x in trace:
+                lines.append(f"- {self.bilingual_resource(x, self.translate_resource_name(x))}")
+        if profile.get("resistance"):
+            lines.append("")
+            lines.append(f"抗性：{self.normalize_profile_level(profile.get('resistance'))}")
+        if profile.get("instability"):
+            lines.append(f"不穩定度：{self.normalize_profile_level(profile.get('instability'))}")
+        if profile.get("special_note"):
+            lines.append(f"補充：{self.bilingualize_known_text(str(profile.get('special_note')))}")
+        return "\n".join(lines)
 
     def _load_sccrafter_index(self) -> dict[str, Any]:
         path = self.json_path.parent / "sccrafter_index.json"
@@ -540,8 +661,8 @@ class MiningDataStore:
             mode = self.normalize_mode(loc.get("mode"))
             source = (loc.get("source") or "").strip()
             body_id = None
-            body_label = body_en
-            system_label = system_en
+            body_label = self.bilingual_body(body_en, self._display_zh(body_en)) if body_en else body_en
+            system_label = self.bilingual_body(system_en, self._display_zh(system_en)) if system_en else system_en
             for b in self._bodies:
                 if body_en and body_en.lower() == b["name_en"].lower():
                     body_id = b["id"]
@@ -552,9 +673,15 @@ class MiningDataStore:
             if key in seen:
                 continue
             seen.add(key)
+            extra = {}
+            if self.is_generic_asteroid_field(body_en):
+                extra["kind"] = "generic_asteroid_profile"
+                extra["details"] = self.generic_asteroid_profile_text(body_en)
+                extra["subtitle"] = self.bilingual_location_name(system_en) if system_en else "多星系 / multi-system"
+                extra["mode"] = "通用小行星型譜"
             results.append({
-                "kind": "resource_location","title": body_label or "未指明地點","subtitle": system_label or "未指明星系",
-                "mode": mode,"source": source,"body_id": body_id,
+                "kind": extra.get("kind", "resource_location"),"title": body_label or "未指明地點","subtitle": extra.get("subtitle", system_label or "未指明星系"),
+                "mode": extra.get("mode", mode),"source": source,"body_id": body_id,"details": extra.get("details"),
             })
         target_terms = set()
         for x in [resource_item.get("name_en"), resource_item.get("name_zh_tw")] + list(resource_item.get("aliases") or []):
@@ -665,29 +792,27 @@ class MiningDataStore:
         if notes:
             header_lines.append("")
             header_lines.append("說明：")
-            header_lines.append(self.bilingualize_known_text(str(notes)))
+            header_lines.append(self._dedupe_lines(self.bilingualize_known_text(str(notes))))
 
         summary = resource_item.get("known_location_summary")
         if summary:
             header_lines.append("")
             header_lines.append("已知採集位置摘要：")
-            header_lines.append(self.bilingualize_known_text(str(summary)))
+            header_lines.append(self._dedupe_lines(self.bilingualize_known_text(str(summary))))
 
         known_locs = resource_item.get("known_locations") or []
-        if include_positions and known_locs:
+        if include_positions and known_locs and not summary:
             header_lines.append("")
             header_lines.append("已知位置：")
-            for loc in known_locs[:8]:
-                body_en = loc.get("body")
-                system_en = loc.get("system")
-                mode = self.normalize_mode(loc.get("mode"))
-                body_disp = self.bilingual_body(body_en, self.get_body_zh(body_en))
-                system_disp = self.bilingual_body(system_en, self._body_name_map.get(str(system_en or '').lower()))
-                loc_line = f"- {body_disp}"
-                if system_disp and system_disp != "-":
-                    loc_line += f"｜{system_disp}"
-                if mode and mode != "-":
-                    loc_line += f"｜{mode}"
+            seen_loc_lines = set()
+            rendered_loc_lines = []
+            for loc in known_locs:
+                loc_line = self._render_known_location_line(loc)
+                if loc_line in seen_loc_lines:
+                    continue
+                seen_loc_lines.add(loc_line)
+                rendered_loc_lines.append(loc_line)
+            for loc_line in rendered_loc_lines[:8]:
                 header_lines.append(loc_line)
 
         craft = resource_item.get("crafting_watch") or {}
@@ -708,6 +833,105 @@ class MiningDataStore:
                 blueprint_lines.extend(self.blueprint_summary_lines(bp))
 
         return "\n".join(header_lines), "\n".join(blueprint_lines)
+
+    def find_facility_candidates(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        q = self._norm_key(query)
+        if not q:
+            return []
+        generic_terms = {"設施", "facility", "facilities", "facilityguide", "機庫", "行政機庫", "爭奪區", "基地", "哨站"}
+        if q in {self._norm_key(x) for x in generic_terms}:
+            items = sorted(self._facility_guides, key=lambda x: (str(x.get("facility_type") or ""), str(x.get("name_zh_tw") or x.get("name_en") or "")))
+            return items[:limit]
+
+        scored = []
+        seen = set()
+        for item in self._facility_guides:
+            tokens = [
+                item.get("name_en"), item.get("name_zh_tw"), item.get("system"),
+                item.get("body"), item.get("facility_type"), item.get("classification")
+            ] + list(item.get("aliases") or [])
+            best = 0.0
+            for token in tokens:
+                t = self._norm_key(token)
+                if not t:
+                    continue
+                if q == t:
+                    best = max(best, 1.0)
+                elif t.startswith(q):
+                    best = max(best, 0.97)
+                elif len(q) >= 2 and q in t:
+                    best = max(best, 0.9)
+            if best > 0:
+                name = item.get("name_en") or ""
+                if name in seen:
+                    continue
+                seen.add(name)
+                scored.append((best, item))
+        scored.sort(key=lambda x: (x[0], str(x[1].get("name_zh_tw") or x[1].get("name_en") or "")), reverse=True)
+        return [it for _, it in scored[:limit]]
+
+    def bilingual_facility(self, name_en: str | None, name_zh_tw: str | None) -> str:
+        en = str(name_en or "").strip()
+        zh = str(name_zh_tw or "").strip()
+        if zh and en and zh != en:
+            return f"{zh} / {en}"
+        return zh or en or "-"
+
+    def facility_detail_text(self, facility: dict[str, Any]) -> str:
+        lines = []
+        lines.append(f'【{self.bilingual_facility(facility.get("name_en"), facility.get("name_zh_tw"))}】')
+        lines.append(f'系統：{self.bilingual_body(facility.get("system"), self.get_body_zh(facility.get("system")))}')
+        body = facility.get("body")
+        lines.append(f'位置：{self.bilingual_location_name(self.bilingual_body(body, self.get_body_zh(body)) if body else "-")}')
+        lines.append(f'設施類型：{facility.get("facility_type") or "-"}')
+        lines.append(f'分類：{facility.get("classification") or "-"}')
+        if facility.get("status"):
+            lines.append(f'狀態：{facility.get("status")}')
+        if facility.get("version_notes"):
+            lines.append(f'版本：{self.bilingualize_known_text(facility.get("version_notes"))}')
+        if facility.get("summary"):
+            lines.append("")
+            lines.append("摘要：")
+            lines.append(self.bilingualize_known_text(facility.get("summary")))
+        if facility.get("access"):
+            lines.append("")
+            lines.append("進入方式：")
+            lines.append(self.bilingualize_known_text(facility.get("access")))
+        if facility.get("guide"):
+            lines.append("")
+            lines.append("攻略：")
+            lines.extend(self.bilingualize_known_text(facility.get("guide")).splitlines())
+        if facility.get("card_locations"):
+            lines.append("")
+            lines.append("拿卡片位置：")
+            for r in facility.get("card_locations", []):
+                lines.append(f"- {self.bilingualize_known_text(str(r))}")
+        if facility.get("timing"):
+            lines.append("")
+            lines.append("開啟時間：")
+            lines.extend(self.bilingualize_known_text(facility.get("timing")).splitlines())
+        if facility.get("rewards_summary"):
+            lines.append("")
+            lines.append("固定獎勵：")
+            lines.append(self.bilingualize_known_text(facility.get("rewards_summary")))
+        if facility.get("rewards"):
+            lines.append("")
+            lines.append("獎勵：")
+            for r in facility.get("rewards", []):
+                lines.append(f"- {self.bilingualize_known_text(str(r))}")
+        if facility.get("external_tools"):
+            lines.append("")
+            lines.append("外部倒數：")
+            for r in facility.get("external_tools", []):
+                lines.append(f"- {self.bilingualize_known_text(str(r))}")
+        if facility.get("diagram_text"):
+            lines.append("")
+            lines.append("文字圖解：")
+            lines.extend(self.bilingualize_known_text(facility.get("diagram_text")).splitlines())
+        if facility.get("image_paths"):
+            lines.append("")
+            lines.append(f"[[IMAGE:{facility.get('image_paths')[0]}]]")
+        return "\n".join(lines)
 
     def resource_summary_text(self, resource_item: dict[str, Any]) -> str:
         head, blueprints = self.resource_summary_parts(resource_item)
