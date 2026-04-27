@@ -2,19 +2,45 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+import threading
+import time
+import urllib.request
+import urllib.error
+import tempfile
+import shutil
+from urllib.parse import urlparse, parse_qs
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+import re
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import messagebox
 
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = None
+    ImageTk = None
+
 from core.data_store import MiningDataStore
 from core.search import MiningSearch
 
-BASE_DIR = Path(__file__).resolve().parent
+def get_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = get_base_dir()
+ASSETS_DIR = BASE_DIR / "assets"
+ICON_PATH = ASSETS_DIR / "sc_mining_overlay.ico"
 SETTINGS_PATH = BASE_DIR / "config" / "overlay_settings.json"
 DATA_PATH = BASE_DIR / "data" / "sc_mining_dataset_latest.json"
+SCC_PATH = BASE_DIR / "data" / "sccrafter_index.json"
+REMOTE_DATA_URL = "https://drive.google.com/uc?export=download&id=1t9L3RSl1gPQRrsltH58uBySzC4_pxWjt"
+REMOTE_SCC_URL = "https://drive.google.com/uc?export=download&id=1-nxq45uudEsGzV7IZxddUOeOT0m4b6hx"
 LOG_DIR = BASE_DIR / "logs"
 LOG_PATH = LOG_DIR / "overlay.log"
 
@@ -40,7 +66,94 @@ def setup_logger() -> logging.Logger:
 LOGGER = setup_logger()
 
 
+def apply_window_icon(window: tk.Misc) -> None:
+    try:
+        if ICON_PATH.exists():
+            window.iconbitmap(default=str(ICON_PATH))
+    except Exception:
+        LOGGER.exception("載入視窗圖示失敗")
+
+
+def _extract_drive_file_id(url: str) -> str | None:
+    try:
+        qs = parse_qs(urlparse(url).query)
+        vals = qs.get("id") or []
+        return vals[0] if vals else None
+    except Exception:
+        return None
+
+
+def _fetch_url_text(url: str, timeout: int = 15) -> tuple[str | None, str | None]:
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json,text/plain,*/*",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        text = raw.decode("utf-8", errors="ignore").lstrip("﻿")
+        if text.lstrip().startswith("{") or text.lstrip().startswith("["):
+            return text, None
+        # google drive sometimes returns confirm/virus html page
+        return None, "遠端回應不是 JSON，請確認 Google Drive 連結為公開直鏈"
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _load_remote_json(url: str) -> tuple[dict | None, str | None]:
+    text, err = _fetch_url_text(url)
+    if err:
+        return None, err
+    try:
+        return json.loads(text or "{}"), None
+    except Exception as exc:
+        return None, f"JSON 解析失敗：{exc}"
+
+
+def _read_json_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+
+
+def _detect_json_version(payload: dict, path: Path | None = None) -> str:
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    if isinstance(meta, dict):
+        for key in ("version", "dataset_version", "data_version", "updated_at", "last_updated"):
+            val = meta.get(key)
+            if val:
+                return str(val)
+    for key in ("version", "dataset_version", "data_version", "updated_at", "last_updated"):
+        val = payload.get(key) if isinstance(payload, dict) else None
+        if val:
+            return str(val)
+    return "未標註"
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.stem + "_", suffix=".tmp", dir=str(path.parent))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8-sig")
+        if path.exists():
+            backup = path.with_suffix(path.suffix + ".bak")
+            shutil.copy2(path, backup)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
 class OverlayApp(tk.Tk):
+
     MIN_W = 640
     MIN_H = 440
     TOOLBAR_W = 96
@@ -67,8 +180,39 @@ class OverlayApp(tk.Tk):
         self._selected_suggestion = None
         self._selected_resource = None
         self._selected_item = None
+        self._selected_facility = None
+        self._hangar_timer_job = None
+        self._hangar_timer_fetch_job = None
+        self._hangar_timer_thread = None
+        self._hangar_timer_active = False
+        self._hangar_timer_state = None
+        self._hangar_timer_source = None
+        self._hangar_timer_fetch_started = 0.0
+        self._hangar_timer_anchor = time.time()
+        self._selected_facility = None
+        self._preview_original_image = None
+        self._preview_render_image = None
+        self._preview_zoom = 1.0
+        self._preview_target_zoom = None
+        self._preview_zoom_job = None
+        self._preview_quality_job = None
+        self._preview_interactive_resample = True
+        self._preview_pan_x = 0
+        self._preview_pan_y = 0
+        self._preview_drag_last = None
+        self._preview_user_changed = False
+        self._preview_fit_locked = False
+        self._preview_full_mode = False
+        self._preview_paths = []
+        self._preview_index = 0
+        self._preview_cache_zoom = None
+        self._preview_cache_path = None
+        self._preview_item_id = None
+        self._hangar_banner_blink_state = False
+        self._hangar_last_light_green_blink = False
 
         self.title("SC Mining Overlay")
+        apply_window_icon(self)
         if not self.safe_mode:
             self.overrideredirect(True)
         self.configure(bg="#0a1016")
@@ -84,10 +228,16 @@ class OverlayApp(tk.Tk):
         self.store = MiningDataStore(DATA_PATH)
         self.search = MiningSearch(self.store)
         self.meta = self.store.get_meta()
+        self._update_dialog = None
+        self._update_progress_var = tk.StringVar(value="")
+        self._update_message_var = tk.StringVar(value="")
+        self._pending_updates = []
+        self._current_update_index = 0
 
         self.toolbar_window = tk.Toplevel(self)
         self.toolbar_window.withdraw()
         self.toolbar_window.title("SC Mining Toolbar")
+        apply_window_icon(self.toolbar_window)
         if not self.safe_mode:
             self.toolbar_window.overrideredirect(True)
         self.toolbar_window.configure(bg="#0e1822")
@@ -106,6 +256,185 @@ class OverlayApp(tk.Tk):
         self.toolbar_window.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.after(100, self._finish_startup)
+        self.after(1400, self._check_remote_json_updates_background)
+
+    def _check_remote_json_updates_background(self) -> None:
+        def worker():
+            updates = self._gather_json_updates()
+            def done():
+                if updates:
+                    self._show_update_prompt(updates)
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _gather_json_updates(self) -> list[dict]:
+        targets = [
+            {"label": "採礦資料", "path": DATA_PATH, "url": REMOTE_DATA_URL},
+            {"label": "製作索引", "path": SCC_PATH, "url": REMOTE_SCC_URL},
+        ]
+        updates = []
+        for target in targets:
+            local_payload = _read_json_file(target["path"]) if target["path"].exists() else {}
+            local_version = _detect_json_version(local_payload, target["path"])
+            remote_payload, err = _load_remote_json(target["url"])
+            if err or not isinstance(remote_payload, dict) or not remote_payload:
+                self.logger.warning("update check failed for %s: %s", target["label"], err)
+                continue
+            remote_version = _detect_json_version(remote_payload)
+            if str(remote_version).strip() != str(local_version).strip():
+                updates.append({
+                    "label": target["label"],
+                    "path": target["path"],
+                    "url": target["url"],
+                    "local_version": local_version,
+                    "remote_version": remote_version,
+                    "remote_payload": remote_payload,
+                })
+        return updates
+
+    def _show_update_prompt(self, updates: list[dict]) -> None:
+        if self._update_dialog is not None:
+            try:
+                self._update_dialog.lift()
+                self._update_dialog.focus_force()
+            except Exception:
+                pass
+            return
+        self._pending_updates = updates
+        win = tk.Toplevel(self)
+        self._update_dialog = win
+        win.title("發現新資料版本")
+        apply_window_icon(win)
+        win.configure(bg="#0f1b25")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        msg_lines = ["檢測到新版本資料，是否更新？", ""]
+        for item in updates:
+            msg_lines.append(f"{item['label']}：{item['local_version']} → {item['remote_version']}")
+        self._update_message_var.set("\n".join(msg_lines))
+        self._update_progress_var.set("")
+        frame = tk.Frame(win, bg="#0f1b25", padx=14, pady=12)
+        frame.pack(fill="both", expand=True)
+        tk.Label(frame, textvariable=self._update_message_var, justify="left", anchor="w", bg="#0f1b25", fg="#e6fbff", font=self.body_font).pack(fill="x")
+        self._update_progress_label = tk.Label(frame, textvariable=self._update_progress_var, justify="left", anchor="w", bg="#0f1b25", fg="#8ed8ff", font=self.small_font)
+        self._update_progress_label.pack(fill="x", pady=(10, 0))
+        btns = tk.Frame(frame, bg="#0f1b25")
+        btns.pack(fill="x", pady=(12, 0))
+        yes = self._mk_btn(btns, "更新", self._confirm_do_updates, width=8)
+        yes.pack(side="left")
+        no = self._mk_btn(btns, "略過", self._close_update_dialog, width=8)
+        no.pack(side="left", padx=(8, 0))
+        self._update_yes_btn = yes
+        self._update_no_btn = no
+        win.protocol("WM_DELETE_WINDOW", self._close_update_dialog)
+        try:
+            win.transient(self)
+            win.grab_set()
+        except Exception:
+            pass
+        win.update_idletasks()
+        x = self.winfo_x() + max(20, (self.winfo_width() - win.winfo_width()) // 2)
+        y = self.winfo_y() + max(20, (self.winfo_height() - win.winfo_height()) // 2)
+        win.geometry(f"+{x}+{y}")
+        try:
+            win.focus_force()
+        except Exception:
+            pass
+
+    def _close_update_dialog(self) -> None:
+        win = self._update_dialog
+        self._update_dialog = None
+        self._pending_updates = []
+        try:
+            if win is not None:
+                try:
+                    win.grab_release()
+                except Exception:
+                    pass
+                win.destroy()
+        except Exception:
+            pass
+
+    def _confirm_do_updates(self) -> None:
+        if not self._pending_updates:
+            self._close_update_dialog()
+            return
+        try:
+            self._update_yes_btn.configure(state="disabled")
+            self._update_no_btn.configure(state="disabled")
+        except Exception:
+            pass
+        threading.Thread(target=self._perform_updates_thread, daemon=True).start()
+
+    def _perform_updates_thread(self) -> None:
+        total = len(self._pending_updates)
+        done_count = 0
+        errors = []
+
+        def post_progress(text: str):
+            try:
+                self.after(0, lambda: self._update_progress_var.set(text))
+            except Exception:
+                pass
+
+        for idx, item in enumerate(list(self._pending_updates), start=1):
+            label = item["label"]
+            post_progress(f"{label}：準備更新 {done_count}/{total}（{int(done_count/total*100) if total else 0}%）")
+            payload = item.get("remote_payload")
+            if not isinstance(payload, dict) or not payload:
+                payload, err = _load_remote_json(item["url"])
+                if err or not isinstance(payload, dict) or not payload:
+                    errors.append(f"{label}：{err or '下載失敗'}")
+                    continue
+            # fake smoother progress checkpoints
+            post_progress(f"{label}：下載完成，寫入中…（{int(((idx-1)+0.45)/total*100)}%）")
+            try:
+                _atomic_write_json(item["path"], payload)
+                done_count += 1
+                post_progress(f"{label}：更新完成（{int(done_count/total*100)}%）")
+            except Exception as exc:
+                errors.append(f"{label}：寫入失敗：{exc}")
+
+        def finish():
+            self._reload_data_files()
+            if errors:
+                self._update_message_var.set("更新完成，但有部分失敗：\n\n" + "\n".join(errors))
+                self._update_progress_var.set(f"完成 {done_count}/{total}（{int(done_count/total*100) if total else 0}%）")
+                try:
+                    self._update_no_btn.configure(text="關閉", state="normal")
+                except Exception:
+                    pass
+                return
+            self._close_update_dialog()
+            try:
+                messagebox.showinfo("資料更新完成", f"已更新 {done_count} 個資料檔，並已熱重載。")
+            except Exception:
+                pass
+
+        try:
+            self.after(0, finish)
+        except Exception:
+            pass
+
+    def _reload_data_files(self) -> None:
+        try:
+            self.store = MiningDataStore(DATA_PATH)
+            self.search = MiningSearch(self.store)
+            self.meta = self.store.get_meta()
+            dataset_name = self.meta.get("dataset_name", "Mining Dataset")
+            version = self.meta.get("version", self.meta.get("dataset_version", "-"))
+            try:
+                self.info_row.winfo_children()[0].configure(text=f"資料：{dataset_name} {version}")
+            except Exception:
+                pass
+            self.status_var.set("資料已更新並重新載入")
+            self._refresh_results(immediate=True)
+        except Exception as exc:
+            self.logger.exception("reload data failed: %s", exc)
+            self.status_var.set("資料已下載，但重新載入失敗")
 
     def _load_settings(self) -> dict:
         if SETTINGS_PATH.exists():
@@ -154,7 +483,7 @@ class OverlayApp(tk.Tk):
         self.titlebar.bind("<B1-Motion>", self._on_drag)
         self.titlebar.bind("<ButtonRelease-1>", lambda e: self._schedule_save())
         tk.Frame(self.titlebar, bg="#7fd8ff", width=6).pack(side="left", fill="y")
-        self.title_label = tk.Label(self.titlebar, text="SC 採礦 製作 查詢系統 浮動視窗", bg="#10202c", fg="#d9f4ff", font=self.title_font)
+        self.title_label = tk.Label(self.titlebar, text="SC 採礦 製作 設施 查詢系統 浮動視窗", bg="#10202c", fg="#d9f4ff", font=self.title_font)
         self.title_label.pack(side="left", padx=10)
         self.title_label.bind("<ButtonPress-1>", self._start_drag)
         self.title_label.bind("<B1-Motion>", self._on_drag)
@@ -170,19 +499,19 @@ class OverlayApp(tk.Tk):
         self.content = tk.Frame(self.outer, bg="#0b131b")
         self.content.pack(fill="both", expand=True)
 
-        info_row = tk.Frame(self.content, bg="#0b131b")
-        info_row.pack(fill="x", padx=12, pady=(8, 2))
+        self.info_row = tk.Frame(self.content, bg="#0b131b")
+        self.info_row.pack(fill="x", padx=12, pady=(8, 2))
         dataset_name = self.meta.get("dataset_name", "Mining Dataset")
         version = self.meta.get("version", "-")
-        tk.Label(info_row, text=f"資料：{dataset_name} {version}", bg="#0b131b", fg="#85a8bb", font=self.small_font).pack(side="left")
-        self.alpha_label_top = tk.Label(info_row, text="", bg="#0b131b", fg="#85a8bb", font=self.small_font)
+        tk.Label(self.info_row, text=f"資料：{dataset_name} {version}", bg="#0b131b", fg="#85a8bb", font=self.small_font).pack(side="left")
+        self.alpha_label_top = tk.Label(self.info_row, text="", bg="#0b131b", fg="#85a8bb", font=self.small_font)
         self.alpha_label_top.pack(side="right")
 
-        search_row = tk.Frame(self.content, bg="#0b131b")
-        search_row.pack(fill="x", padx=12, pady=(2, 0))
+        self.search_row = tk.Frame(self.content, bg="#0b131b")
+        self.search_row.pack(fill="x", padx=12, pady=(2, 0))
         self.query_var = tk.StringVar(value=self.settings.get("last_query", ""))
         self.query_var.trace_add("write", self._on_query_change)
-        self.search_entry = tk.Entry(search_row, textvariable=self.query_var, font=self.body_font,
+        self.search_entry = tk.Entry(self.search_row, textvariable=self.query_var, font=self.body_font,
                                      bg="#081118", fg="#e6fbff", insertbackground="#9fefff",
                                      relief="flat", bd=8, highlightthickness=1,
                                      highlightbackground="#2e5a72", highlightcolor="#7fd8ff")
@@ -191,7 +520,7 @@ class OverlayApp(tk.Tk):
         self.search_entry.bind("<Up>", self._suggest_up)
         self.search_entry.bind("<Return>", self._suggest_apply)
         self.search_entry.bind("<Escape>", lambda e: self._hide_suggestions())
-        self._mk_btn(search_row, "清", self._clear_query, width=3).pack(side="left", padx=(6,0))
+        self._mk_btn(self.search_row, "清", self._clear_query, width=3).pack(side="left", padx=(6,0))
 
         self.suggest_frame = tk.Frame(self.content, bg="#10202c", highlightthickness=1, highlightbackground="#3e708d")
         self.suggest_list = tk.Listbox(self.suggest_frame, bg="#081118", fg="#e6fbff",
@@ -202,7 +531,7 @@ class OverlayApp(tk.Tk):
         self.suggest_list.bind("<ButtonRelease-1>", self._click_suggestion)
         self.suggest_list.bind("<Return>", self._suggest_enter)
 
-        self.recent_label = tk.Label(self.content, text="上方聯想先顯示礦物；點選後左邊列出關聯區域，右邊顯示地圖/礦點資訊。",
+        self.recent_label = tk.Label(self.content, text="上方聯想先顯示列表；點選後左邊列出關聯區域，右邊顯示地圖/礦點/設施資訊。",
                                      bg="#0b131b", fg="#85a8bb", font=self.small_font, anchor="w")
         self.recent_label.pack(fill="x", padx=12, pady=(6,8))
 
@@ -223,28 +552,158 @@ class OverlayApp(tk.Tk):
         self.result_list.bind("<Double-Button-1>", lambda e: self._apply_result_selection())
         self.result_list.bind("<Return>", lambda e: self._apply_result_selection())
 
-        tk.Label(self.right_panel, text="地圖 / 礦點資訊", bg="#0f1b25", fg="#d9f4ff", font=self.title_font).pack(fill="x", padx=8, pady=(8,6))
+        self.right_title_label = tk.Label(self.right_panel, text="地圖 / 礦點 / 設施 資訊", bg="#0f1b25", fg="#d9f4ff", font=self.title_font)
+        self.right_title_label.pack(fill="x", padx=8, pady=(8,6))
+        self.timer_banner_frame = tk.Frame(self.right_panel, bg="#1b3242")
+        self.timer_banner = tk.Label(
+            self.timer_banner_frame,
+            text="",
+            bg="#1b3242",
+            fg="#f4fbff",
+            font=self.hud_font,
+            anchor="w",
+            padx=8,
+            pady=5,
+        )
+        self.timer_banner.pack(side="left", padx=(0, 6))
+        self.timer_banner_inline = tk.Frame(self.timer_banner_frame, bg="#1b3242")
+        self.timer_banner_inline.pack(side="left", padx=(2, 6))
+        self.timer_banner_lights = tk.Canvas(
+            self.timer_banner_inline,
+            width=0,
+            height=18,
+            bg="#1b3242",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.timer_banner_lights.pack(side="left")
+        self.timer_banner_tail = tk.Label(
+            self.timer_banner_inline,
+            text="",
+            bg="#1b3242",
+            fg="#f4fbff",
+            font=self.hud_font,
+            anchor="w",
+            padx=0,
+            pady=5,
+        )
+        self.timer_banner_tail.pack(side="left", padx=(4, 0))
+        self.timer_banner_spacer = tk.Frame(self.timer_banner_frame, bg="#1b3242")
+        self.timer_banner_spacer.pack(side="left", fill="x", expand=True)
+        self._timer_banner_state = {"bg": "#1b3242", "fg": "#f4fbff", "text": "", "tail": "", "lights": []}
         self.risk_banner = tk.Label(self.right_panel, text="風險：待判定", bg="#23465a", fg="#e6fbff", font=self.hud_font, anchor="w", padx=8, pady=4)
         self.risk_banner.pack(fill="x", padx=8, pady=(0,6))
-        self.detail = tk.Text(self.right_panel, wrap="word", bg="#081118", fg="#e6fbff",
+        self.right_split = tk.PanedWindow(self.right_panel, orient="vertical", sashwidth=8, bg="#0f1b25", bd=0, relief="flat")
+        self.right_split.pack(fill="both", expand=True, padx=8, pady=(0,8))
+        self.right_split.bind("<ButtonRelease-1>", self._remember_preview_sash)
+
+        self.detail_holder = tk.Frame(self.right_split, bg="#0f1b25")
+        self.detail = tk.Text(self.detail_holder, wrap="word", bg="#081118", fg="#e6fbff",
                               bd=0, relief="flat", highlightthickness=1, highlightbackground="#2e5a72",
                               font=self.body_font, padx=8, pady=8)
-        self.detail.pack(fill="both", expand=True, padx=8, pady=(0,8))
-        self.detail.tag_configure("item_title",
-                                  foreground="#C6FFAC",
-                                  background="#132514",
-                                  font=(self.ui_font_name, 14, "bold"))
-        self.detail.tag_configure("blueprint_name",
-                                  foreground="#A8FF9E",
-                                  background="#102117",
-                                  font=(self.ui_font_name, 13, "bold"))
-        self.detail.tag_configure("section_header",
-                                  foreground="#8ED8FF",
-                                  font=(self.ui_font_name, 11, "bold"))
-        self.detail.tag_configure("material_line",
-                                  foreground="#8EE6FF")
-        self.detail.tag_configure("mission_line",
-                                  foreground="#FFD98E")
+        self.detail.pack(fill="both", expand=True)
+
+        self.preview_frame = tk.Frame(self.right_split, bg="#0f1b25", highlightthickness=1, highlightbackground="#2e5a72", height=320)
+        self.preview_title = tk.Label(self.preview_frame, text="設施圖解（上一張／下一張／滾輪縮放／左鍵拖曳／圖片雙擊重置大小）", bg="#10202c", fg="#d9f4ff", font=self.small_font, anchor="w", padx=8, pady=4)
+        self.preview_title.pack(fill="x")
+        self.preview_btn_row = tk.Frame(self.preview_frame, bg="#0f1b25")
+        self.preview_btn_row.pack(fill="x", padx=6, pady=(6,4))
+        self.preview_prev_btn = self._mk_btn(self.preview_btn_row, "上一張", self._preview_prev_image, width=10)
+        self.preview_prev_btn.pack(side="left", padx=(0,6))
+        self.preview_next_btn = self._mk_btn(self.preview_btn_row, "下一張", self._preview_next_image, width=10)
+        self.preview_next_btn.pack(side="left", padx=(0,6))
+        self.preview_page_label = tk.Label(self.preview_btn_row, text="0 / 0", bg="#0f1b25", fg="#d9f4ff", font=self.small_font, width=8, anchor="center")
+        self.preview_page_label.pack(side="left", padx=(0,10))
+        self.preview_expand_btn = self._mk_btn(self.preview_btn_row, "填滿整頁", self._expand_preview_section, width=12)
+        self.preview_expand_btn.pack(side="left", padx=(0,6))
+        self.preview_restore_btn = self._mk_btn(self.preview_btn_row, "恢復大小", self._restore_preview_section, width=12)
+        self.preview_restore_btn.pack(side="left")
+        self.preview_restore_btn.configure(state="disabled")
+        self.preview_canvas = tk.Canvas(self.preview_frame, bg="#081118", highlightthickness=0, bd=0, height=260, cursor="fleur")
+        self.preview_canvas.pack(fill="both", expand=True)
+        self.preview_path_label = tk.Label(self.preview_frame, text="", bg="#10202c", fg="#85a8bb", font=self.small_font, anchor="w", padx=8, pady=4)
+        self.preview_path_label.pack(fill="x")
+
+        self.right_split.add(self.detail_holder, minsize=40)
+        try:
+            self.right_split.sash_place(0, 0, 420)
+        except Exception:
+            pass
+        self.preview_canvas.bind("<Configure>", self._on_preview_configure)
+        self.preview_canvas.bind("<ButtonPress-1>", self._on_preview_press)
+        self.preview_canvas.bind("<B1-Motion>", self._on_preview_drag)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._on_preview_release)
+        self.preview_canvas.bind("<Double-Button-1>", self._reset_preview_view)
+        self.preview_canvas.bind("<MouseWheel>", self._on_preview_wheel)
+        self.preview_canvas.bind("<Button-4>", lambda e: self._on_preview_wheel(e, 120))
+        self.preview_canvas.bind("<Button-5>", lambda e: self._on_preview_wheel(e, -120))
+        self.preview_hidden = True
+        self._preview_expanded = False
+        self._preview_fit_locked = False
+        self._preview_full_mode = False
+        self._preview_paths = []
+        self._preview_index = 0
+        self._preview_cache_zoom = None
+        self._preview_cache_path = None
+        self._preview_item_id = None
+        self.detail.tag_configure(
+            "item_title",
+            foreground="#D8F7A8",
+            font=(self.ui_font_name, 16, "bold"),
+            spacing1=4,
+            spacing3=14,
+        )
+        self.detail.tag_configure(
+            "blueprint_name",
+            foreground="#B9FF95",
+            font=(self.ui_font_name, 15, "bold"),
+            lmargin1=8,
+            lmargin2=8,
+            spacing1=14,
+            spacing3=8,
+        )
+        self.detail.tag_configure(
+            "blueprint_meta",
+            foreground="#B7D7E7",
+            font=(self.ui_font_name, 11, "bold"),
+            lmargin1=24,
+            lmargin2=24,
+            spacing1=2,
+            spacing3=2,
+        )
+        self.detail.tag_configure(
+            "section_header",
+            foreground="#8ED8FF",
+            font=(self.ui_font_name, 12, "bold"),
+            spacing1=12,
+            spacing3=4,
+        )
+        self.detail.tag_configure(
+            "material_line",
+            foreground="#90E8FF",
+            lmargin1=34,
+            lmargin2=52,
+            spacing1=2,
+            spacing3=1,
+        )
+        self.detail.tag_configure(
+            "mission_line",
+            foreground="#FFD792",
+            lmargin1=34,
+            lmargin2=52,
+            spacing1=2,
+            spacing3=1,
+        )
+        self.detail.tag_configure(
+            "resource_name",
+            foreground="#C6FFAC",
+            font=(self.ui_font_name, 11, "bold"),
+        )
+        self.detail.tag_configure(
+            "subtle_label",
+            foreground="#9CB8C8",
+            font=(self.ui_font_name, 11, "bold"),
+        )
         self.detail.configure(state="disabled")
 
         bottom = tk.Frame(self.content, bg="#0b131b")
@@ -309,12 +768,34 @@ class OverlayApp(tk.Tk):
     def _apply_visuals(self):
         scale = max(0.8, min(2.0, float(self.settings.get("font_scale", 1.0))))
         self.settings["font_scale"] = round(scale, 2)
-        self.body_font.configure(size=max(10, round(11 * scale)))
-        self.small_font.configure(size=max(8, round(9 * scale)))
-        self.title_font.configure(size=max(11, round(12 * scale)))
-        self.button_font.configure(size=max(8, round(9 * scale)))
+        body_size = max(10, round(11 * scale))
+        small_size = max(8, round(9 * scale))
+        title_size = max(11, round(12 * scale))
+        button_size = max(8, round(9 * scale))
+        hud_size = max(9, round(10 * scale))
+        self.body_font.configure(size=body_size)
+        self.small_font.configure(size=small_size)
+        self.title_font.configure(size=title_size)
+        self.button_font.configure(size=button_size)
         if hasattr(self, "hud_font"):
-            self.hud_font.configure(size=max(9, round(10 * scale)))
+            self.hud_font.configure(size=hud_size)
+        if hasattr(self, "detail"):
+            self.detail.configure(
+                font=self.body_font,
+                padx=max(10, round(12 * scale)),
+                pady=max(10, round(10 * scale)),
+                spacing1=max(1, round(2 * scale)),
+                spacing2=max(2, round(3 * scale)),
+                spacing3=max(2, round(3 * scale)),
+            )
+            self.detail.tag_configure("item_title", font=(self.ui_font_name, max(15, round(16 * scale)), "bold"), spacing3=max(10, round(14 * scale)))
+            self.detail.tag_configure("blueprint_name", font=(self.ui_font_name, max(14, round(15 * scale)), "bold"), spacing1=max(10, round(14 * scale)), spacing3=max(6, round(8 * scale)))
+            self.detail.tag_configure("blueprint_meta", font=(self.ui_font_name, max(10, round(11 * scale)), "bold"), lmargin1=max(22, round(24 * scale)), lmargin2=max(22, round(24 * scale)))
+            self.detail.tag_configure("section_header", font=(self.ui_font_name, max(11, round(12 * scale)), "bold"), spacing1=max(8, round(12 * scale)), spacing3=max(3, round(4 * scale)))
+            self.detail.tag_configure("material_line", lmargin1=max(28, round(34 * scale)), lmargin2=max(42, round(52 * scale)))
+            self.detail.tag_configure("mission_line", lmargin1=max(28, round(34 * scale)), lmargin2=max(42, round(52 * scale)))
+            self.detail.tag_configure("resource_name", font=(self.ui_font_name, max(10, round(11 * scale)), "bold"))
+            self.detail.tag_configure("subtle_label", font=(self.ui_font_name, max(10, round(11 * scale)), "bold"))
         alpha = max(0.35, min(1.0, float(self.settings.get("alpha", 0.95))))
         self.settings["alpha"] = round(alpha, 2)
         self.attributes("-alpha", alpha)
@@ -503,6 +984,15 @@ class OverlayApp(tk.Tk):
         self._selected_suggestion = None
         self._selected_resource = None
         self._selected_item = None
+        self._selected_facility = None
+        self._hangar_timer_job = None
+        self._hangar_timer_fetch_job = None
+        self._hangar_timer_thread = None
+        self._hangar_timer_active = False
+        self._hangar_timer_state = None
+        self._hangar_timer_source = None
+        self._hangar_timer_fetch_started = 0.0
+        self._hangar_timer_anchor = time.time()
         self._refresh_results(immediate=False)
 
     def _refresh_results(self, immediate=False):
@@ -513,6 +1003,72 @@ class OverlayApp(tk.Tk):
             self._run_search()
         else:
             self._query_job = self.after(70, self._run_search)
+
+
+    def _is_executive_hangar_query(self, query: str) -> bool:
+        q = (query or "").strip().lower()
+        if not q:
+            return False
+        terms = {
+            "行政機庫", "行政機庫任務", "機庫任務", "機庫",
+            "executive hangars", "executive hangar", "exhang",
+            "pyam-exhang", "pyam-exhang-0-1", "facility_executive_hangars",
+        }
+        q_norm = q.replace("_", "-")
+        return q in {x.lower() for x in terms} or q_norm in {x.lower().replace("_", "-") for x in terms}
+
+    def _get_executive_hangar_facilities(self):
+        out = []
+        seen = set()
+        payload = getattr(self.store, "payload", {}) or {}
+        for item in (payload.get("facility_guides") or []):
+            name_en = str(item.get("name_en") or "").strip().lower()
+            name_zh = str(item.get("name_zh_tw") or "").strip().lower()
+            aliases = {str(x).strip().lower() for x in (item.get("aliases") or []) if str(x).strip()}
+            item_id = str(item.get("id") or "").strip().lower()
+            timer_mode = str(item.get("timer_mode") or "").strip().lower()
+            body = str(item.get("body") or "").strip().lower()
+
+            haystack = {name_en, name_zh, item_id, timer_mode, body} | aliases
+            if (
+                "executive hangar" in name_en
+                or "executive hangars" in haystack
+                or "executive hangar" in haystack
+                or "行政機庫" in haystack
+                or "行政機庫任務" in haystack
+                or "機庫任務" in haystack
+                or item_id == "facility_executive_hangars"
+                or timer_mode == "executive_hangar_live"
+                or body == "pyam-exhang-0-1"
+                or "pyam-exhang" in haystack
+                or "pyam-exhang-0-1" in haystack
+                or "exhang" in haystack
+            ):
+                key = item_id or name_en or name_zh or body
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(item)
+
+        if out:
+            return out
+
+        # Fallback: ask the store search with multiple known names and merge results.
+        probes = [
+            "行政機庫", "行政機庫任務", "機庫任務",
+            "Executive Hangars", "Executive Hangar",
+            "EXHANG", "PYAM-EXHANG", "PYAM-EXHANG-0-1"
+        ]
+        for probe in probes:
+            try:
+                results = self.store.find_facility_candidates(probe, limit=8) or []
+            except Exception:
+                results = []
+            for item in results:
+                key = str(item.get("id") or item.get("name_en") or item.get("name_zh_tw") or "").strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(item)
+        return out
 
     def _run_search(self):
         query = self.query_var.get().strip()
@@ -525,12 +1081,19 @@ class OverlayApp(tk.Tk):
             self._selected_resource = None
             self._selected_item = None
             self._set_risk_banner(None)
-            self._set_detail("請先從上方聯想選礦物、圖紙或地點。")
-            self.status_var.set("可從最近紀錄、礦物、圖紙或地點聯想中選擇")
+            self._set_detail("請先從上方聯想選礦物、圖紙、設施或地點。")
+            self.status_var.set("可從最近紀錄、礦物、圖紙、設施或地點聯想中選擇")
             return
 
         resource_candidates = self.store.find_resource_candidates(query, limit=10)
         item_candidates = self.store.find_item_candidates(query, limit=10)
+        facility_limit = 32 if query in {"設施", "facility", "facilities"} else 12
+        facility_candidates = self.store.find_facility_candidates(query, limit=facility_limit)
+
+        if self._is_executive_hangar_query(query):
+            forced_hangar = self._get_executive_hangar_facilities()
+            if forced_hangar:
+                facility_candidates = forced_hangar
 
         if self._selected_resource is not None:
             sel_names = {str(self._selected_resource.get("name_en","")).lower(), str(self._selected_resource.get("name_zh_tw","")).lower()}
@@ -545,12 +1108,36 @@ class OverlayApp(tk.Tk):
                 self._show_item_results(self._selected_item)
                 return
 
+        if self._selected_facility is not None:
+            sel_names = {
+                str(self._selected_facility.get("name_en","")).lower(),
+                str(self._selected_facility.get("name_zh_tw","")).lower(),
+            }
+            sel_names.update(str(a).lower() for a in (self._selected_facility.get("aliases") or []))
+            if query.lower() in sel_names:
+                self._show_facility_results([self._selected_facility])
+                return
+
+        if self._is_executive_hangar_query(query) and facility_candidates:
+            self._show_facility_results(facility_candidates)
+            return
+
+        if ("行政機庫" in query or "executive hangar" in query.lower() or "exhang" in query.lower()) and not facility_candidates:
+            forced_hangar = self._get_executive_hangar_facilities()
+            if forced_hangar:
+                self._show_facility_results(forced_hangar)
+                return
+
         if resource_candidates or item_candidates:
             self._result_rows = []
             self.result_list.delete(0, tk.END)
             self._set_risk_banner(None)
-            self._set_detail("請先從上方聯想中選擇正確礦物、圖紙或地點，之後才會顯示關聯資訊。")
-            self.status_var.set(f"找到 {len(resource_candidates)} 個礦物候選、{len(item_candidates)} 個圖紙候選，請先選擇")
+            self._set_detail("請先從上方聯想中選擇正確礦物、圖紙、設施或地點，之後才會顯示關聯資訊。")
+            self.status_var.set(f"找到 {len(resource_candidates)} 個礦物候選、{len(item_candidates)} 個圖紙候選、{len(facility_candidates)} 個設施候選，請先選擇")
+            return
+
+        if facility_candidates:
+            self._show_facility_results(facility_candidates)
             return
 
         rows = self.search.search(query, limit=24)
@@ -591,6 +1178,20 @@ class OverlayApp(tk.Tk):
                 seen.add(key)
                 out.append({"kind":"item","display":display,"query":item.get("name_zh_tw") or item.get("name_zh") or item.get("name_en") or display,"meta":meta,"scc_item":item})
 
+        facility_items = self.store.find_facility_candidates(q, limit=8)
+        if self._is_executive_hangar_query(q):
+            forced_hangar = self._get_executive_hangar_facilities()
+            if forced_hangar:
+                facility_items = forced_hangar
+
+        for item in facility_items:
+            display = self.store.bilingual_facility(item.get("name_en"), item.get("name_zh_tw"))
+            meta = item.get("facility_type") or "設施"
+            key = ("facility", display)
+            if key not in seen:
+                seen.add(key)
+                out.append({"kind":"facility","display":display,"query":item.get("name_zh_tw") or item.get("name_en") or display,"meta":meta,"facility_item":item})
+
         for item in self.search.suggest(q, recent=[], limit=12):
             if item.get("kind") != "body":
                 continue
@@ -608,7 +1209,7 @@ class OverlayApp(tk.Tk):
             self._hide_suggestions()
             return
         for item in self._suggestions:
-            prefix = "最近" if item["kind"] == "recent" else ("礦物" if item["kind"] == "resource" else ("圖紙" if item["kind"] == "item" else "地點"))
+            prefix = "最近" if item["kind"] == "recent" else ("礦物" if item["kind"] == "resource" else ("圖紙" if item["kind"] == "item" else ("設施" if item["kind"] == "facility" else "地點")))
             meta = f'｜{item.get("meta","")}' if item.get("meta") else ""
             self.suggest_list.insert(tk.END, f"{prefix}｜{item['display']}{meta}")
         self._show_suggestions()
@@ -676,6 +1277,7 @@ class OverlayApp(tk.Tk):
         self._selected_suggestion = item
         self._selected_resource = item.get("resource_item")
         self._selected_item = item.get("scc_item")
+        self._selected_facility = item.get("facility_item")
         self._suppress_query = True
         self.query_var.set(item["query"])
         self._suppress_query = False
@@ -684,6 +1286,23 @@ class OverlayApp(tk.Tk):
         # 選到礦物後，自動顯示必須跟手動點左側清單完全一致
         if self._result_rows:
             self._show_detail_for_result(self._result_rows[0], resource_item=self._selected_resource)
+
+    def _show_facility_results(self, items):
+        rows = []
+        for item in items:
+            title = self.store.bilingual_facility(item.get("name_en"), item.get("name_zh_tw"))
+            subtitle = item.get("facility_type") or item.get("classification") or "設施"
+            rows.append({
+                "kind": "facility",
+                "title": title,
+                "subtitle": subtitle,
+                "facility_item": item,
+            })
+        self._result_rows = rows
+        self._render_results()
+        self.status_var.set(f"設施結果 {len(rows)} 筆")
+        if rows:
+            self._show_detail_for_result(rows[0])
 
     def _show_resource_results(self, resource_item):
         rows = self.store.resource_locations(resource_item)
@@ -740,8 +1359,12 @@ class OverlayApp(tk.Tk):
                 self._show_detail_for_result(self._result_rows[idx], resource_item=self._selected_resource)
 
     def _show_detail_for_result(self, row, resource_item=None):
+        self._set_preview_image(None)
+        self._clear_hangar_timer()
         # 搜尋圖紙時，只顯示該圖紙本身，不再把材料拆成左側結果清單
-        if row.get("kind") == "scc_item":
+        if row.get("kind") == "facility":
+            self._show_facility_detail(row.get("facility_item") or {})
+        elif row.get("kind") == "scc_item":
             self._set_risk_banner(None)
             self._set_detail(self.store.scc_item_detail_text(row.get("scc_item") or {}))
         elif row.get("kind") == "item_material":
@@ -806,9 +1429,15 @@ class OverlayApp(tk.Tk):
                 lines.append(f"- {self.store.bilingualize_known_text(self.store.bilingual_location_name(loc))}")
         lines.append("")
         lines.append("資源概況")
-        lines.append("地表：" + self.store.bilingualize_known_text(self._fmt_resource_list(mining.get("known_surface_resources", []))))
-        lines.append("洞穴：" + self.store.bilingualize_known_text(self._fmt_resource_list(mining.get("known_cave_resources", []))))
-        lines.append("太空／小行星：" + self.store.bilingualize_known_text(self._fmt_resource_list(mining.get("known_asteroid_resources", []))))
+        lines.append("")
+        lines.append("【地表】")
+        lines.append(self._fmt_resource_list(mining.get("known_surface_resources", [])))
+        lines.append("")
+        lines.append("【洞穴】")
+        lines.append(self._fmt_resource_list(mining.get("known_cave_resources", [])))
+        lines.append("")
+        lines.append("【太空／小行星】")
+        lines.append(self._fmt_resource_list(mining.get("known_asteroid_resources", [])))
         if blueprint_text:
             lines.append("")
             lines.append("—— 製作圖紙 ——")
@@ -818,12 +1447,28 @@ class OverlayApp(tk.Tk):
 
     def _show_location_detail(self, row, resource_item=None):
         lines = []
+        blueprint_text = ""
         if resource_item:
-            lines.append(self.store.resource_summary_text(resource_item))
+            head, blueprint_text = self.store.resource_summary_parts(resource_item, include_positions=False)
+            lines.append(head)
             lines.append("")
             lines.append("—— 關聯地點 ——")
-        lines.append(f'【{row.get("title","-")}】')
-        lines.append(f'所屬：{row.get("subtitle","-")}')
+        if row.get("kind") == "generic_asteroid_profile" and row.get("details"):
+            lines.append(self.store.bilingualize_known_text(row.get("details")))
+            if blueprint_text:
+                lines.append("")
+                lines.append("—— 製作圖紙 ——")
+                lines.append(blueprint_text)
+            self._set_risk_banner(None)
+            self._set_detail("\n".join(lines))
+            return
+        title = row.get("title","-")
+        subtitle = row.get("subtitle","-")
+        if self.store.is_generic_asteroid_field(title):
+            title = self.store.bilingual_location_name(title)
+            subtitle = self.store.bilingual_location_name(subtitle)
+        lines.append(f'【{title}】')
+        lines.append(f'所屬：{subtitle}')
         mode = row.get("mode")
         if mode:
             lines.append(f'採集模式：{self.store.normalize_mode(mode)}')
@@ -832,6 +1477,14 @@ class OverlayApp(tk.Tk):
             lines.append("")
             lines.append("關聯摘要：")
             lines.append(self.store.bilingualize_known_text(details))
+        elif self.store.is_generic_asteroid_field(row.get("title")):
+            lines.append("")
+            lines.append("說明：")
+            lines.append("此項目是小行星成分類型，不是固定地點。")
+        if blueprint_text:
+            lines.append("")
+            lines.append("—— 製作圖紙 ——")
+            lines.append(blueprint_text)
         body = self.store.get_body(row.get("body_id")) if row.get("body_id") else None
         self._set_risk_banner(body)
         self._set_detail("\n".join(lines))
@@ -862,22 +1515,1090 @@ class OverlayApp(tk.Tk):
             return ("中風險", "#6d5618", f"{peak_label}｜注意熱門路線｜{peak_region}")
         return ("低風險", "#1f5a3a", f"{peak_label}｜相對分散｜{peak_region}")
 
+
+    def _set_timer_banner(self, text: str | None = None, bg: str = "#1b3242", fg: str = "#f4fbff", lights=None, tail_text: str = "") -> None:
+        if not text:
+            try:
+                self.timer_banner_frame.pack_forget()
+            except Exception:
+                pass
+            self.timer_banner.configure(text="", bg="#1b3242", fg="#f4fbff")
+            self.timer_banner_tail.configure(text="", bg="#1b3242", fg="#f4fbff")
+            self.timer_banner_lights.configure(bg="#1b3242", width=0)
+            self.timer_banner_inline.configure(bg="#1b3242")
+            self.timer_banner_spacer.configure(bg="#1b3242")
+            self.timer_banner_lights.delete("all")
+            self._timer_banner_state = {"bg": "#1b3242", "fg": "#f4fbff", "text": "", "tail": "", "lights": []}
+            return
+
+        lights = list(lights or [])
+        self._timer_banner_state = {"bg": bg, "fg": fg, "text": text, "tail": tail_text, "lights": lights}
+        self.timer_banner_frame.configure(bg=bg)
+        self.timer_banner.configure(text=text, bg=bg, fg=fg)
+        self.timer_banner_inline.configure(bg=bg)
+        self.timer_banner_spacer.configure(bg=bg)
+        self.timer_banner_tail.configure(text=tail_text, bg=bg, fg=fg)
+        self.timer_banner_lights.configure(bg=bg)
+        self.timer_banner_lights.delete("all")
+
+        if lights:
+            radius = 8
+            gap = 7
+            x = 8
+            y = 8.3
+            color_map = {"綠": "#23d14d", "紅": "#ff4d4f", "藍": "#4da3ff", "熄": "#2a2a2a", "亮": "#ffd24d", "?": "#cfcfcf"}
+            blink_last_green = len(lights) == 5 and str(lights[-1]) == "綠" and bool(getattr(self, "_hangar_last_light_green_blink", False))
+            for idx, light in enumerate(lights[:5]):
+                key = str(light)
+                fill = color_map.get(key, "#cfcfcf")
+                outline = "#8a8a8a" if fill == "#2a2a2a" else fill
+                if blink_last_green and idx == 4:
+                    fill = bg if getattr(self, "_hangar_banner_blink_state", False) else "#23d14d"
+                    outline = "#23d14d"
+                self.timer_banner_lights.create_oval(
+                    x - radius, y - radius, x + radius, y + radius,
+                    fill=fill, outline=outline, width=1
+                )
+                x += radius * 2 + gap
+            self.timer_banner_lights.configure(width=max(38, x - gap - 5))
+        else:
+            self.timer_banner_lights.configure(width=0)
+
+        try:
+            self.timer_banner_frame.pack_forget()
+        except Exception:
+            pass
+
+        before_widget = None
+        try:
+            if self.risk_banner.winfo_manager() == "pack":
+                before_widget = self.risk_banner
+            elif self.right_split.winfo_manager() == "pack":
+                before_widget = self.right_split
+        except Exception:
+            before_widget = None
+
+        try:
+            if before_widget is not None:
+                self.timer_banner_frame.pack(fill="x", padx=8, pady=(0,6), before=before_widget)
+            else:
+                self.timer_banner_frame.pack(fill="x", padx=8, pady=(0,6))
+        except Exception:
+            self.timer_banner_frame.pack(fill="x", padx=8, pady=(0,6))
+
+    def _clear_hangar_timer(self) -> None:
+        self._hangar_timer_active = False
+        if self._hangar_timer_job is not None:
+            try:
+                self.after_cancel(self._hangar_timer_job)
+            except Exception:
+                pass
+            self._hangar_timer_job = None
+        if self._hangar_timer_fetch_job is not None:
+            try:
+                self.after_cancel(self._hangar_timer_fetch_job)
+            except Exception:
+                pass
+            self._hangar_timer_fetch_job = None
+        self._hangar_timer_state = None
+        self._hangar_timer_source = None
+        self._set_timer_banner(None)
+
+
+    def _start_hangar_timer(self, facility: dict) -> None:
+        self.logger.info("start hangar timer via SC ExecHang: %s", facility.get("name_en"))
+        self._clear_hangar_timer()
+        self._hangar_timer_active = True
+        self._set_timer_banner("行政機庫即時狀態｜正在從 SC ExecHang 讀取一次校正時間…", bg="#214c66")
+        self._schedule_hangar_fetch(force=True)
+
+
+    def _schedule_hangar_fetch(self, force: bool = False) -> None:
+        if not self._hangar_timer_active:
+            return
+
+        if self._hangar_timer_fetch_job is not None:
+            if force:
+                try:
+                    self.after_cancel(self._hangar_timer_fetch_job)
+                except Exception:
+                    pass
+                self._hangar_timer_fetch_job = None
+            else:
+                return
+
+        if self._hangar_timer_thread is not None and self._hangar_timer_thread.is_alive() and not force:
+            return
+
+        delay_ms = 0 if force else 900
+
+        def kickoff():
+            self._hangar_timer_fetch_job = None
+            if not self._hangar_timer_active:
+                return
+            if self._hangar_timer_thread is not None and self._hangar_timer_thread.is_alive():
+                return
+
+            self._hangar_timer_fetch_started = time.time()
+
+            def worker():
+                state = self._fetch_hangar_external_state()
+
+                def apply():
+                    if not self._hangar_timer_active:
+                        return
+                    if state:
+                        state["refetch_requested"] = False
+                    self._hangar_timer_state = state
+                    self._hangar_timer_source = state.get("source") if state else None
+                    self._hangar_timer_thread = None
+                    self._hangar_timer_tick()
+
+                try:
+                    self.after(0, apply)
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=worker, daemon=True)
+            self._hangar_timer_thread = t
+            t.start()
+
+        self._hangar_timer_fetch_job = self.after(delay_ms, kickoff)
+
+    def _fetch_hangar_external_state(self, force: bool = False) -> None:
+        return
+
+    def _hangar_browser_candidates(self) -> list[str]:
+        candidates: list[str] = []
+
+        env_path = str((os.environ.get("SC_HANGAR_BROWSER") or "")).strip()
+        if env_path:
+            candidates.append(env_path)
+
+        local_roots = [BASE_DIR, BASE_DIR.parent]
+        local_names = [
+            "chrome.exe",
+            "msedge.exe",
+            "chromium.exe",
+            "GoogleChromePortable.exe",
+        ]
+        for root in local_roots:
+            for name in local_names:
+                path = root / name
+                if path.exists():
+                    candidates.append(str(path))
+
+        common_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Chromium\Application\chrome.exe",
+            r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
+        ]
+        for path in common_paths:
+            if Path(path).exists():
+                candidates.append(path)
+
+        seen = set()
+        ordered = []
+        for item in candidates:
+            key = item.lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(item)
+        return ordered
+
+    def _fetch_hangar_external_state(self) -> dict | None:
+        source = "scexechang"
+        url = "https://sc-exechang.vercel.app/"
+
+        # 先用瀏覽器渲染後 DOM，因為此站有時候直接抓原始 HTML 只會拿到前端殼。
+        try:
+            from playwright.sync_api import sync_playwright  # type: ignore
+            with sync_playwright() as pw:
+                html = None
+                last_exc = None
+
+                launch_attempts: list[dict] = []
+                if getattr(sys, "frozen", False):
+                    for browser_path in self._hangar_browser_candidates():
+                        launch_attempts.append({"headless": True, "executable_path": browser_path})
+                launch_attempts.append({"headless": True})
+
+                for launch_kwargs in launch_attempts:
+                    browser = None
+                    try:
+                        self.logger.info("hangar playwright launch attempt: %s", launch_kwargs)
+                        browser = pw.chromium.launch(**launch_kwargs)
+                        page = browser.new_page(viewport={"width": 1280, "height": 900})
+                        page.goto(url, wait_until="domcontentloaded", timeout=12000)
+                        try:
+                            page.wait_for_timeout(1600)
+                            page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_selector("h2, .font-mono, [style*='background-color']", timeout=5000)
+                        except Exception:
+                            pass
+                        html = page.content()
+                        if html:
+                            break
+                    except Exception as exc:
+                        last_exc = exc
+                        self.logger.warning("hangar playwright launch failed: %s | kwargs=%s", exc, launch_kwargs)
+                    finally:
+                        if browser is not None:
+                            try:
+                                browser.close()
+                            except Exception:
+                                pass
+
+                if not html and last_exc is not None:
+                    raise last_exc
+
+            state = self._parse_hangar_external_state(html or "", source)
+            if state:
+                self.logger.info("hangar source ok (playwright): %s | state=%s", source, state)
+                return state
+            self.logger.warning("hangar source parsed empty after playwright: %s", source)
+        except Exception as exc:
+            self.logger.warning("hangar playwright unavailable or failed: %s", exc)
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-TW;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+            state = self._parse_hangar_external_state(html, source)
+            if state:
+                self.logger.info("hangar source ok (urllib): %s | state=%s", source, state)
+                return state
+            self.logger.warning("hangar source parsed empty: %s", source)
+            return None
+        except Exception as exc:
+            self.logger.exception("hangar source failed: %s | %s", source, exc)
+            return None
+
+    def _hangar_phase_from_text(self, text: str | None) -> str | None:
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            return None
+        if "closed" in lowered:
+            return "closed"
+        if "charging" in lowered:
+            return "charging"
+        if "opening" in lowered:
+            return "opening"
+        if lowered == "open" or "hangar open" in lowered or "ready" in lowered:
+            return "open"
+        if "active" in lowered:
+            return "active"
+        if "cooldown" in lowered:
+            return "cooldown"
+        if "reset" in lowered:
+            return "reset"
+        if "closing" in lowered:
+            return "closing"
+        return None
+
+    def _classify_hangar_light(self, style_text: str | None) -> str:
+        style = str(style_text or "").strip().lower()
+        if not style:
+            return "?"
+        if "green" in style:
+            return "綠"
+        if "red" in style:
+            return "紅"
+        if "blue" in style:
+            return "藍"
+        m = re.search(r"rgb[a]?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)", style, re.I)
+        if not m:
+            return "?"
+        r, g, b = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if max(r, g, b) < 60:
+            return "熄"
+        if g > r + 40 and g > b + 40:
+            return "綠"
+        if r > g + 40 and r > b + 40:
+            return "紅"
+        if b > r + 40 and b > g + 40:
+            return "藍"
+        return "亮"
+
+    def _summarize_hangar_lights(self, text: str) -> str:
+        styles = re.findall(r"background-color\s*:\s*([^;\"\']+)", text or "", re.I)
+        if not styles:
+            return "-"
+        labels = [self._classify_hangar_light(x) for x in styles[:5]]
+        return " / ".join(labels) if labels else "-"
+
+    def _parse_hangar_external_state(self, text: str, source: str) -> dict | None:
+        raw = text or ""
+        clean = re.sub(r"<[^>]+>", " ", raw)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        phase = None
+        remaining = None
+        status_text = None
+        timer_label = None
+        light_remaining = None
+
+        light_styles = re.findall(r"background-color\s*:\s*([^;\"\']+)", raw, re.I)[:5]
+        light_labels = [self._classify_hangar_light(x) for x in light_styles]
+        lights_summary = " / ".join(light_labels) if light_labels else "-"
+
+        # 直接抓畫面上的狀態標題
+        m = re.search(r">\s*(Hangar\s+(?:Closed|Open|Opening|Charging|Active|Ready|Closing))\s*<", raw, re.I)
+        if m:
+            status_text = m.group(1).strip()
+            phase = self._hangar_phase_from_text(status_text)
+        elif re.search(r"hangar\s+closed", clean, re.I):
+            status_text = "Hangar Closed"
+            phase = "closed"
+        elif re.search(r"hangar\s+open", clean, re.I):
+            status_text = "Hangar Open"
+            phase = "open"
+
+        # 主倒數：Open in / Charging in / Reset in
+        m = re.search(r">\s*((?:Open|Charging|Reset)\s+in)\s+([0-9]{1,2}):([0-9]{2})(?::([0-9]{2}))?\s*<", raw, re.I)
+        if not m:
+            m = re.search(r"((?:Open|Charging|Reset)\s+in)\s+([0-9]{1,2}):([0-9]{2})(?::([0-9]{2}))?", clean, re.I)
+        if m:
+            timer_label = m.group(1).strip()
+            if m.group(4) is not None:
+                remaining = int(m.group(2)) * 3600 + int(m.group(3)) * 60 + int(m.group(4))
+            else:
+                remaining = int(m.group(2)) * 60 + int(m.group(3))
+
+            timer_label_lower = timer_label.lower()
+            if timer_label_lower.startswith("charging"):
+                phase = "charging"
+            elif timer_label_lower.startswith("reset"):
+                phase = "open"
+            elif timer_label_lower.startswith("open"):
+                phase = "waiting"
+            elif phase is None:
+                phase = "closed"
+
+        # 燈號旁小倒數，例如 <span class="... font-mono">03:19</span>
+        m = re.search(r"<span[^>]*font-mono[^>]*>\s*([0-9]{1,2}):([0-9]{2})\s*</span>", raw, re.I)
+        if m:
+            light_remaining = int(m.group(1)) * 60 + int(m.group(2))
+        else:
+            candidates = re.findall(r">\s*([0-9]{1,2}):([0-9]{2})\s*<", raw, re.I)
+            vals = []
+            for a, b in candidates:
+                sec = int(a) * 60 + int(b)
+                if remaining is not None and sec == remaining:
+                    continue
+                vals.append(sec)
+            if vals:
+                light_remaining = vals[-1]
+
+        if phase is None and remaining is not None:
+            phase = "unknown"
+
+        if phase is None and remaining is None and lights_summary == "-" and light_remaining is None:
+            return None
+
+        return {
+            "source": source,
+            "phase": phase or "unknown",
+            "remaining": remaining,
+            "fetched_at": time.time(),
+            "status_text": status_text,
+            "timer_label": timer_label,
+            "lights_summary": lights_summary,
+            "lights_raw": light_labels,
+            "light_remaining": light_remaining,
+            "raw_text": clean,
+        }
+
+
+
+    def _hangar_timer_tick(self) -> None:
+        if not self._hangar_timer_active:
+            return
+
+        self.logger.info("hangar tick active=%s state=%s", self._hangar_timer_active, self._hangar_timer_state)
+        self._hangar_banner_blink_state = not bool(getattr(self, "_hangar_banner_blink_state", False))
+        self._hangar_last_light_green_blink = False
+
+        if not self._hangar_timer_state:
+            self._set_timer_banner("行政機庫即時狀態｜無法從 SC ExecHang 讀取時間", bg="#665028")
+            self._hangar_timer_job = self.after(3000, lambda: self._schedule_hangar_fetch(force=True))
+            return
+
+        elapsed = int(time.time() - float(self._hangar_timer_state.get("fetched_at", time.time())))
+        text = str(self._hangar_timer_state.get("raw_text") or "")
+        remaining_raw = self._hangar_timer_state.get("remaining")
+
+        if "Reset in" in text:
+            phase = "open"
+            label = "開放中（倒數關門）"
+        elif "Hangar Open" in text:
+            phase = "open"
+            label = "開放中"
+        elif "Charging in" in text:
+            phase = "charging"
+            label = "充能中"
+        elif "Open in" in text:
+            phase = "waiting"
+            label = "尚未開放"
+        elif "Closed" in text:
+            phase = "closed"
+            label = "關閉"
+        else:
+            phase = str(self._hangar_timer_state.get("phase") or "unknown").lower()
+            phase_labels = {
+                "unknown": "未知",
+                "charging": "充能中",
+                "active": "可開門",
+                "cooldown": "冷卻中",
+                "reset": "重置中",
+                "closed": "機庫關閉",
+                "opening": "準備開啟",
+                "open": "已開啟 / 可進入",
+                "waiting": "尚未開放",
+                "closing": "即將關閉",
+            }
+            label = phase_labels.get(phase, "未知")
+
+        remaining = None
+        if remaining_raw is not None:
+            remaining = max(0, int(remaining_raw) - elapsed)
+
+        lights = list(self._hangar_timer_state.get("lights_raw") or [])
+        if not lights:
+            summary = str(self._hangar_timer_state.get("lights_summary") or "")
+            lights = [x.strip() for x in summary.split("/") if x.strip()] if summary else []
+
+        if len(lights) == 5 and str(lights[-1]) == "綠":
+            self._hangar_last_light_green_blink = True
+
+        light_remaining = self._hangar_timer_state.get("light_remaining")
+        light_left = None
+        if light_remaining is not None:
+            light_left = max(0, int(light_remaining) - elapsed)
+
+        refetch_requested = bool(self._hangar_timer_state.get("refetch_requested", False))
+
+        time_text = ""
+        if remaining is not None:
+            hh = remaining // 3600
+            mm = (remaining % 3600) // 60
+            ss = remaining % 60
+            if phase == "open":
+                time_text = f"關門倒數 {hh:02d}:{mm:02d}:{ss:02d}"
+            elif phase in ("waiting", "charging"):
+                time_text = f"開啟倒數 {hh:02d}:{mm:02d}:{ss:02d}"
+            else:
+                time_text = f"剩餘 {hh:02d}:{mm:02d}:{ss:02d}"
+
+        if phase == "open":
+            if remaining is not None and remaining <= 180:
+                bg = "#d13438" if self._hangar_banner_blink_state else "#6d2d34"
+            else:
+                bg = "#24583f"
+        elif phase == "charging":
+            bg = "#7a5d1a"
+        elif phase == "waiting":
+            bg = "#235e7d"
+        else:
+            bg = "#6d2d34"
+
+        parts = [f"行政機庫即時狀態｜SC ExecHang｜{label}"]
+        if time_text:
+            parts.append(time_text)
+        if refetch_requested:
+            parts.append("同步中…")
+
+        tail_text = ""
+        if light_left is not None:
+            tail_text = f"燈號倒數 {light_left // 60:02d}:{light_left % 60:02d}"
+
+        self._set_timer_banner("｜".join(parts), bg=bg, lights=lights, tail_text=tail_text)
+
+        should_refetch = False
+        if remaining is not None and remaining <= 0:
+            should_refetch = True
+        # 燈號旁的小倒數歸零時，也要重抓一次外部狀態，
+        # 否則畫面會停在 00:00 不更新。
+        if light_left is not None and light_left <= 0:
+            should_refetch = True
+
+        if should_refetch:
+            if not refetch_requested:
+                self._hangar_timer_state["refetch_requested"] = True
+                self._schedule_hangar_fetch(force=True)
+            self._hangar_timer_job = self.after(1000, self._hangar_timer_tick)
+            return
+
+        self._hangar_timer_job = self.after(1000, self._hangar_timer_tick)
+
     def _set_risk_banner(self, body=None):
+
         if not body:
             self.risk_banner.configure(text="風險：待判定", bg="#23465a", fg="#e6fbff")
             return
         level, color, msg = self._body_risk(body)
         self.risk_banner.configure(text=f"風險：{level}｜{msg}", bg=color, fg="#f5fbff")
 
+    def _update_preview_nav(self):
+        total = len(getattr(self, '_preview_paths', []) or [])
+        idx = int(getattr(self, '_preview_index', 0) or 0)
+        if hasattr(self, 'preview_page_label'):
+            self.preview_page_label.configure(text=(f"{idx + 1} / {total}" if total else "0 / 0"))
+        state = "normal" if total > 1 else "disabled"
+        if hasattr(self, 'preview_prev_btn'):
+            self.preview_prev_btn.configure(state=state)
+        if hasattr(self, 'preview_next_btn'):
+            self.preview_next_btn.configure(state=state)
+
+    def _set_preview_images(self, rel_paths):
+        paths = []
+        for x in (rel_paths or []):
+            rel = str(x).strip()
+            if not rel:
+                continue
+            try:
+                if (BASE_DIR / rel).exists():
+                    paths.append(rel)
+            except Exception:
+                continue
+        self._preview_paths = paths
+        self._preview_index = 0
+        if not self._preview_paths:
+            self._hide_preview_image()
+            return
+        self._show_current_preview(reset_view=True)
+
+    def _show_current_preview(self, reset_view=False):
+        if not getattr(self, '_preview_paths', None):
+            self._hide_preview_image()
+            return
+        self._preview_index = max(0, min(int(self._preview_index), len(self._preview_paths) - 1))
+        self._set_preview_image(self._preview_paths[self._preview_index], reset_view=reset_view)
+        self._update_preview_nav()
+
+    def _preview_prev_image(self):
+        total = len(getattr(self, '_preview_paths', []) or [])
+        if total <= 1:
+            return
+        self._preview_index = (self._preview_index - 1) % total
+        self._show_current_preview(reset_view=False)
+
+    def _preview_next_image(self):
+        total = len(getattr(self, '_preview_paths', []) or [])
+        if total <= 1:
+            return
+        self._preview_index = (self._preview_index + 1) % total
+        self._show_current_preview(reset_view=False)
+
+    def _expand_preview_section(self):
+        if getattr(self, "preview_hidden", True):
+            return
+        if getattr(self, "_preview_full_mode", False):
+            return
+
+        try:
+            self._preview_restore_sash_y = self.right_split.sash_coord(0)[1]
+        except Exception:
+            self._preview_restore_sash_y = None
+        self._preview_restore_timer_text = self._timer_banner_state.get("text", "")
+        self._preview_restore_timer_bg = self._timer_banner_state.get("bg", "#1b3242")
+        self._preview_restore_timer_fg = self._timer_banner_state.get("fg", "#f4fbff")
+        self._preview_restore_timer_visible = bool(self.timer_banner_frame.winfo_ismapped())
+        self._preview_restore_timer_tail = self._timer_banner_state.get("tail", "")
+        self._preview_restore_timer_lights = list(self._timer_banner_state.get("lights", []))
+        self._preview_restore_risk_visible = bool(self.risk_banner.winfo_ismapped())
+        self._preview_restore_right_title_visible = bool(self.right_title_label.winfo_ismapped())
+        self._preview_restore_suggest_visible = bool(self.suggest_frame.winfo_manager())
+
+        for widget in (self.info_row, self.search_row, self.recent_label):
+            try:
+                widget.pack_forget()
+            except Exception:
+                pass
+        try:
+            self.suggest_frame.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.right_title_label.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.timer_banner_frame.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.risk_banner.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            for pane in list(self.main_area.panes()):
+                self.main_area.forget(pane)
+            self.main_area.add(self.right_panel, minsize=360)
+        except Exception:
+            pass
+
+        try:
+            for pane in list(self.right_split.panes()):
+                self.right_split.forget(pane)
+            self.right_split.add(self.preview_frame, minsize=160)
+        except Exception:
+            pass
+
+        self._preview_full_mode = True
+        self._preview_expanded = True
+        self.preview_expand_btn.configure(state="disabled")
+        self.preview_restore_btn.configure(state="normal")
+        self.preview_canvas.after_idle(self._render_preview_image)
+        self._update_preview_nav()
+
+    def _restore_preview_section(self):
+        if not getattr(self, "_preview_full_mode", False):
+            if not getattr(self, "preview_hidden", True):
+                try:
+                    sash_y = getattr(self, "_preview_restore_sash_y", None) or getattr(self, "_preview_last_sash_y", None) or int(max(500, self.right_panel.winfo_height() or 700) * 0.62)
+                    self.right_split.sash_place(0, 0, int(sash_y))
+                except Exception:
+                    pass
+            self.preview_restore_btn.configure(state="disabled")
+            self.preview_expand_btn.configure(state="normal")
+            self._preview_expanded = False
+            return
+
+        try:
+            self.info_row.pack(fill="x", padx=12, pady=(8, 2), before=self.main_area)
+        except Exception:
+            pass
+        try:
+            self.search_row.pack(fill="x", padx=12, pady=(2, 0), before=self.main_area)
+        except Exception:
+            pass
+        if getattr(self, "_preview_restore_suggest_visible", False):
+            try:
+                self._show_suggestions()
+            except Exception:
+                pass
+        try:
+            self.recent_label.pack(fill="x", padx=12, pady=(6,8), before=self.main_area)
+        except Exception:
+            pass
+
+        try:
+            for pane in list(self.main_area.panes()):
+                self.main_area.forget(pane)
+            self.main_area.add(self.left_panel, minsize=250)
+            self.main_area.add(self.right_panel, minsize=360)
+        except Exception:
+            pass
+
+        try:
+            self.right_title_label.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.timer_banner_frame.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.risk_banner.pack_forget()
+        except Exception:
+            pass
+
+        if getattr(self, "_preview_restore_right_title_visible", True):
+            try:
+                self.right_title_label.pack(fill="x", padx=8, pady=(8,6), before=self.right_split)
+            except Exception:
+                try:
+                    self.right_title_label.pack(fill="x", padx=8, pady=(8,6))
+                except Exception:
+                    pass
+
+        if getattr(self, "_preview_restore_risk_visible", True):
+            try:
+                self.risk_banner.pack(fill="x", padx=8, pady=(0,6), before=self.right_split)
+            except Exception:
+                pass
+
+        if getattr(self, "_preview_restore_timer_visible", False) and str(getattr(self, "_preview_restore_timer_text", "") or "").strip():
+            try:
+                self._set_timer_banner(self._preview_restore_timer_text, bg=self._preview_restore_timer_bg, fg=self._preview_restore_timer_fg, lights=getattr(self, "_preview_restore_timer_lights", []), tail_text=getattr(self, "_preview_restore_timer_tail", ""))
+            except Exception:
+                try:
+                    self.timer_banner.pack(fill="x", padx=8, pady=(0,6), before=self.right_split)
+                except Exception:
+                    pass
+
+        try:
+            for pane in list(self.right_split.panes()):
+                self.right_split.forget(pane)
+            self.right_split.add(self.detail_holder, minsize=40)
+            if not getattr(self, "preview_hidden", False):
+                self.right_split.add(self.preview_frame, minsize=180)
+        except Exception:
+            pass
+
+        if not getattr(self, "preview_hidden", False):
+            try:
+                sash_y = getattr(self, "_preview_restore_sash_y", None) or getattr(self, "_preview_last_sash_y", None) or int(max(500, self.right_panel.winfo_height() or 700) * 0.62)
+                self.right_split.sash_place(0, 0, int(sash_y))
+            except Exception:
+                pass
+
+        self._preview_full_mode = False
+        self._preview_expanded = False
+        self.preview_expand_btn.configure(state="normal")
+        self.preview_restore_btn.configure(state="disabled")
+        self.preview_canvas.after_idle(self._render_preview_image)
+        self._update_preview_nav()
+
+    def _remember_preview_sash(self, event=None):
+        try:
+            y = self.right_split.sash_coord(0)[1]
+            self._preview_last_sash_y = int(y)
+            self._preview_pane_initialized = True
+        except Exception:
+            pass
+
+    def _hide_preview_image(self):
+        if getattr(self, "_preview_full_mode", False):
+            self._restore_preview_section()
+        self.preview_canvas.delete("all")
+        self.preview_path_label.configure(text="")
+        self._preview_original_image = None
+        self._preview_render_image = None
+        self._preview_cache_zoom = None
+        self._preview_cache_path = None
+        self._preview_item_id = None
+        self._preview_drag_last = None
+        self._preview_user_changed = False
+        self._preview_auto_fit_pending = False
+        self._preview_current_path = None
+        self._preview_paths = []
+        self._preview_index = 0
+        self._preview_expanded = False
+        self._preview_fit_locked = False
+        self._update_preview_nav()
+        if hasattr(self, "preview_restore_btn"):
+            self.preview_restore_btn.configure(state="disabled")
+        if hasattr(self, "preview_expand_btn"):
+            self.preview_expand_btn.configure(state="normal")
+        if not getattr(self, "preview_hidden", False):
+            try:
+                self.right_split.forget(self.preview_frame)
+            except Exception:
+                pass
+            self.preview_hidden = True
+
+    def _fit_preview_zoom(self):
+        if self._preview_original_image is None:
+            self._preview_zoom = 1.0
+            return
+        try:
+            cw = max(1, int(self.preview_canvas.winfo_width()))
+            ch = max(1, int(self.preview_canvas.winfo_height()))
+        except Exception:
+            cw, ch = 520, 260
+        ow, oh = self._preview_original_image.size
+        if ow <= 0 or oh <= 0:
+            self._preview_zoom = 1.0
+            return
+        self._preview_zoom = min(cw / ow, ch / oh, 1.0)
+        if self._preview_zoom <= 0:
+            self._preview_zoom = 1.0
+
+    def _render_preview_image(self):
+        if self._preview_original_image is None:
+            self.preview_canvas.delete("all")
+            self._preview_item_id = None
+            return
+        img = self._preview_original_image
+        ow, oh = img.size
+        zoom = max(0.1, min(6.0, float(self._preview_zoom)))
+        nw = max(1, int(ow * zoom))
+        nh = max(1, int(oh * zoom))
+        try:
+            need_reraster = (
+                self._preview_render_image is None
+                or self._preview_cache_zoom != (nw, nh)
+                or self._preview_cache_path != str(self._preview_current_path)
+            )
+            if need_reraster:
+                if Image is not None and ImageTk is not None:
+                    resample = Image.BILINEAR if getattr(self, "_preview_interactive_resample", True) else Image.LANCZOS
+                    resized = img.resize((nw, nh), resample)
+                    self._preview_render_image = ImageTk.PhotoImage(resized)
+                else:
+                    self._preview_render_image = tk.PhotoImage(file=str(self._preview_current_path))
+                self._preview_cache_zoom = (nw, nh)
+                self._preview_cache_path = str(self._preview_current_path)
+        except Exception:
+            self.logger.exception("預覽圖縮放失敗")
+            return
+
+        cx = max(1, int(self.preview_canvas.winfo_width())) // 2 + int(self._preview_pan_x)
+        cy = max(1, int(self.preview_canvas.winfo_height())) // 2 + int(self._preview_pan_y)
+        if self._preview_item_id is None:
+            self.preview_canvas.delete("all")
+            self._preview_item_id = self.preview_canvas.create_image(cx, cy, image=self._preview_render_image, anchor="center", tags="preview")
+        else:
+            try:
+                self.preview_canvas.itemconfigure(self._preview_item_id, image=self._preview_render_image)
+                self.preview_canvas.coords(self._preview_item_id, cx, cy)
+            except Exception:
+                self.preview_canvas.delete("all")
+                self._preview_item_id = self.preview_canvas.create_image(cx, cy, image=self._preview_render_image, anchor="center", tags="preview")
+
+    def _set_preview_image(self, rel_path, reset_view=False):
+        if not rel_path:
+            self._hide_preview_image()
+            return
+        try:
+            path = BASE_DIR / str(rel_path)
+            if not path.exists():
+                self._hide_preview_image()
+                return
+            same_path = (self._preview_current_path == path) and (self._preview_original_image is not None)
+            if (not same_path) or reset_view:
+                keep_zoom = (
+                    (not reset_view)
+                    and self._preview_original_image is not None
+                    and self._preview_user_changed
+                )
+                prev_zoom = self._preview_zoom
+                prev_fit_locked = self._preview_fit_locked
+                self._preview_current_path = path
+                if Image is not None:
+                    self._preview_original_image = Image.open(path).convert("RGBA")
+                else:
+                    return
+                self._preview_pan_x = 0
+                self._preview_pan_y = 0
+                self._preview_render_image = None
+                self._preview_cache_zoom = None
+                self._preview_cache_path = None
+                self._preview_item_id = None
+                self._preview_target_zoom = None
+                self._preview_interactive_resample = True
+                if keep_zoom and prev_zoom:
+                    self._preview_zoom = prev_zoom
+                    self._preview_user_changed = True
+                    self._preview_auto_fit_pending = False
+                    self._preview_fit_locked = prev_fit_locked or True
+                else:
+                    self._preview_zoom = None
+                    self._preview_user_changed = False
+                    self._preview_auto_fit_pending = True
+                    self._preview_fit_locked = False
+
+            self.preview_path_label.configure(text=str(rel_path))
+            if not getattr(self, "_preview_full_mode", False):
+                self.preview_expand_btn.configure(state="normal")
+                self.preview_restore_btn.configure(state="disabled")
+            else:
+                self.preview_expand_btn.configure(state="disabled")
+                self.preview_restore_btn.configure(state="normal")
+            if getattr(self, "preview_hidden", True):
+                try:
+                    self.right_split.add(self.preview_frame, minsize=160)
+                except Exception:
+                    pass
+                self.preview_hidden = False
+                try:
+                    total_h = max(500, self.right_panel.winfo_height() or 700)
+                    sash_y = self._preview_last_sash_y if getattr(self, "_preview_pane_initialized", False) and getattr(self, "_preview_last_sash_y", None) else int(total_h * 0.62)
+                    self.right_split.sash_place(0, 0, sash_y)
+                except Exception:
+                    pass
+            self.preview_frame.update_idletasks()
+            if (self._preview_auto_fit_pending or self._preview_zoom is None) and not self._preview_fit_locked:
+                self._fit_preview_zoom()
+                self._preview_auto_fit_pending = False
+            self._render_preview_image()
+        except Exception:
+            self.logger.exception("預覽圖片載入失敗: %s", rel_path)
+
+    def _on_preview_configure(self, event=None):
+        if self._preview_original_image is None:
+            return
+        if (not self._preview_fit_locked) and (not self._preview_user_changed) and (self._preview_auto_fit_pending or self._preview_zoom is None):
+            self._fit_preview_zoom()
+            self._preview_pan_x = 0
+            self._preview_pan_y = 0
+            self._preview_auto_fit_pending = False
+        self._render_preview_image()
+
+    def _on_preview_press(self, event):
+        if self._preview_original_image is None:
+            return
+        self._preview_user_changed = True
+        self._preview_fit_locked = True
+        self._preview_auto_fit_pending = False
+        self._preview_drag_last = (event.x, event.y)
+
+    def _on_preview_drag(self, event):
+        if self._preview_original_image is None or not self._preview_drag_last:
+            return
+        if self._preview_quality_job is not None:
+            try:
+                self.after_cancel(self._preview_quality_job)
+            except Exception:
+                pass
+            self._preview_quality_job = None
+        lx, ly = self._preview_drag_last
+        dx = (event.x - lx)
+        dy = (event.y - ly)
+        self._preview_pan_x += dx
+        self._preview_pan_y += dy
+        self._preview_drag_last = (event.x, event.y)
+        self._preview_user_changed = True
+        if self._preview_item_id is not None:
+            try:
+                self.preview_canvas.move(self._preview_item_id, dx, dy)
+                return
+            except Exception:
+                self._preview_item_id = None
+        self._render_preview_image()
+
+    def _on_preview_release(self, event=None):
+        self._preview_drag_last = None
+
+    def _apply_preview_zoom(self):
+        self._preview_zoom_job = None
+        if self._preview_original_image is None:
+            return
+        if self._preview_target_zoom is None:
+            return
+        self._preview_zoom = self._preview_target_zoom
+        self._preview_user_changed = True
+        self._preview_fit_locked = True
+        self._preview_interactive_resample = True
+        self._preview_render_image = None
+        self._preview_cache_zoom = None
+        self._render_preview_image()
+        if self._preview_quality_job is not None:
+            try:
+                self.after_cancel(self._preview_quality_job)
+            except Exception:
+                pass
+        self._preview_quality_job = self.after(120, self._finalize_preview_quality)
+
+    def _finalize_preview_quality(self):
+        self._preview_quality_job = None
+        if self._preview_original_image is None:
+            return
+        self._preview_interactive_resample = False
+        self._preview_render_image = None
+        self._preview_cache_zoom = None
+        self._render_preview_image()
+
+    def _on_preview_wheel(self, event, delta=None):
+        if self._preview_original_image is None:
+            return
+        d = delta if delta is not None else getattr(event, 'delta', 0)
+        if d == 0:
+            return
+        base_zoom = self._preview_target_zoom if self._preview_target_zoom else self._preview_zoom
+        factor = 1.09 if d > 0 else (1 / 1.09)
+        new_zoom = max(0.1, min(6.0, base_zoom * factor))
+        if abs(new_zoom - base_zoom) < 1e-6:
+            return
+        self._preview_target_zoom = new_zoom
+        self._preview_user_changed = True
+        self._preview_fit_locked = True
+        if self._preview_zoom_job is not None:
+            try:
+                self.after_cancel(self._preview_zoom_job)
+            except Exception:
+                pass
+        self._preview_zoom_job = self.after(12, self._apply_preview_zoom)
+
+    def _reset_preview_view(self, event=None):
+        if self._preview_original_image is None:
+            return
+        self._preview_pan_x = 0
+        self._preview_pan_y = 0
+        self._preview_user_changed = False
+        self._preview_fit_locked = False
+        self._fit_preview_zoom()
+        self._preview_target_zoom = None
+        self._preview_interactive_resample = False
+        self._preview_render_image = None
+        self._preview_cache_zoom = None
+        self._preview_cache_path = None
+        self._preview_item_id = None
+        self._render_preview_image()
+
+
+    def _show_facility_detail(self, facility):
+        self.logger.info("facility detail opened: %s", facility.get("name_en") if facility else None)
+        if not facility:
+            self._set_risk_banner(None)
+            self._set_detail("找不到設施資料")
+            return
+        images = facility.get("image_paths") or []
+        self._set_preview_images(images)
+        self._set_risk_banner(None)
+        name_en = (facility.get("name_en") or "").strip()
+        if name_en == "Executive Hangars":
+            self._start_hangar_timer(facility)
+        else:
+            self._clear_hangar_timer()
+            timing_lines = list(facility.get("card_timing") or [])
+            if facility.get("timing"):
+                timing_lines.extend(str(facility.get("timing")).splitlines())
+            if timing_lines:
+                first_line = str(timing_lines[0]).strip()
+                self._set_timer_banner(f"設施時間｜{first_line}", bg="#304d5c")
+            else:
+                self._set_timer_banner(None)
+        self._set_detail(self.store.facility_detail_text(facility))
+
     def _set_detail(self, text):
+        filtered_lines = [line for line in text.splitlines() if not line.strip().startswith("[[IMAGE:")]
+
+        formatted_lines = []
+        in_blueprint_section = False
+        for raw_line in filtered_lines:
+            stripped = raw_line.strip()
+            if stripped == "—— 製作圖紙 ——":
+                in_blueprint_section = True
+            elif stripped.startswith("—— ") and stripped.endswith(" ——") and stripped != "—— 製作圖紙 ——":
+                in_blueprint_section = False
+
+            is_top_blueprint = in_blueprint_section and raw_line.startswith("- ")
+            if is_top_blueprint and formatted_lines and formatted_lines[-1].strip():
+                formatted_lines.append("")
+            formatted_lines.append(raw_line)
+
+        clean_text = "\n".join(formatted_lines)
         self.detail.configure(state="normal")
         self.detail.delete("1.0", tk.END)
-        self.detail.insert("1.0", text)
+        self.detail.insert("1.0", clean_text)
 
-        lines = text.splitlines()
+        lines = clean_text.splitlines()
         in_blueprint_section = False
         in_materials = False
         in_missions = False
+
+        general_headers = {
+            "摘要：", "狀態分析：", "進入方式：", "1–7 任務順序：", "拿卡片位置：", "卡片時間：", "最後插卡位置：",
+            "開啟時間：", "倒數參考：", "固定獎勵：", "獎勵：", "外部倒數：", "文字圖解：", "說明：", "補充：",
+            "已知採集位置摘要：", "資源概況", "到達方式", "判斷理由："
+        }
 
         for idx, line in enumerate(lines, start=1):
             stripped = line.strip()
@@ -887,40 +2608,64 @@ class OverlayApp(tk.Tk):
             if idx == 1 and stripped.startswith("【") and stripped.endswith("】"):
                 self.detail.tag_add("item_title", start, end)
 
-            if stripped in {"關聯製作圖紙：", "—— 製作圖紙 ——"}:
+            if not stripped or stripped.startswith("[[IMAGE:"):
+                continue
+
+            if stripped in {"—— 製作圖紙 ——", "關聯製作圖紙："}:
                 in_blueprint_section = True
                 in_materials = False
                 in_missions = False
                 self.detail.tag_add("section_header", start, end)
                 continue
 
-            if stripped in {"材料：", "獲取任務："}:
+            if stripped.startswith("—— ") and stripped.endswith(" ——") and stripped != "—— 製作圖紙 ——":
+                in_blueprint_section = False
+                in_materials = False
+                in_missions = False
+                self.detail.tag_add("section_header", start, end)
+                continue
+
+            if stripped in general_headers or stripped in {"【地表】", "【洞穴】", "【太空／小行星】"}:
+                self.detail.tag_add("section_header", start, end)
+                continue
+
+            if in_blueprint_section and stripped in {"材料：", "獲取任務："}:
                 self.detail.tag_add("section_header", start, end)
                 in_materials = stripped == "材料："
                 in_missions = stripped == "獲取任務："
                 continue
 
-            if stripped.startswith("分類：") or stripped.startswith("材料數：") or stripped.startswith("獲取任務數："):
-                self.detail.tag_add("section_header", start, end)
+            is_top_blueprint = in_blueprint_section and line.startswith("- ")
+            is_nested_bullet = line.startswith("    - ") or line.startswith("  - ")
 
-            if in_blueprint_section and stripped.startswith("- "):
+            if is_top_blueprint:
+                in_materials = False
+                in_missions = False
                 self.detail.tag_add("blueprint_name", start, end)
+                continue
 
-            if in_materials:
-                if stripped.startswith("-") or stripped.startswith("•") or stripped.startswith("－") or stripped.startswith("• "):
-                    self.detail.tag_add("material_line", start, end)
-                elif stripped.startswith("  - "):
-                    self.detail.tag_add("material_line", start, end)
-                elif not stripped:
-                    in_materials = False
+            if in_blueprint_section and (stripped.startswith("分類：") or stripped.startswith("材料數：") or stripped.startswith("獲取任務數：")):
+                self.detail.tag_add("blueprint_meta", start, end)
+                continue
 
-            if in_missions:
-                if stripped.startswith("-") or stripped.startswith("•") or stripped.startswith("－"):
-                    self.detail.tag_add("mission_line", start, end)
-                elif stripped.startswith("  - "):
-                    self.detail.tag_add("mission_line", start, end)
-                elif not stripped:
-                    in_missions = False
+            if in_materials and is_nested_bullet:
+                self.detail.tag_add("material_line", start, end)
+                continue
+
+            if in_missions and is_nested_bullet:
+                self.detail.tag_add("mission_line", start, end)
+                continue
+
+            if stripped.startswith("- ") and not in_blueprint_section:
+                resource_match = re.match(r"^-\s+([^｜\n]+)", stripped)
+                if resource_match:
+                    name_text = resource_match.group(1)
+                    line_start_index = f"{idx}.0+2c"
+                    line_name_end = f"{idx}.0+{2 + len(name_text)}c"
+                    try:
+                        self.detail.tag_add("resource_name", line_start_index, line_name_end)
+                    except Exception:
+                        pass
 
         self.detail.configure(state="disabled")
 
@@ -955,8 +2700,52 @@ class OverlayApp(tk.Tk):
 
     def _fmt_resource_list(self, items):
         if not items:
-            return "-"
-        return "；".join(self.store.translate_resource_text(x) for x in items[:10])
+            return "- 無已確認資料"
+
+        lines = []
+        seen = set()
+
+        for raw in items:
+            if raw is None:
+                continue
+
+            txt = str(raw).strip()
+            if not txt:
+                continue
+
+            name_part = txt
+            desc_part = ""
+
+            if " - " in txt:
+                name_part, desc_part = txt.split(" - ", 1)
+
+            name_part = str(name_part).strip()
+            desc_part = str(desc_part).strip()
+
+            zh = str(self.store.translate_resource_text(name_part) or "").strip()
+            zh_only = zh
+
+            if " / " in zh:
+                parts = [p.strip() for p in zh.split(" / ", 1)]
+                if len(parts) == 2 and parts[1].lower() == name_part.lower():
+                    zh_only = parts[0].strip()
+
+            if zh_only and zh_only.lower() != name_part.lower():
+                display_name = f"{zh_only} / {name_part}"
+            else:
+                display_name = name_part
+
+            dedup_key = (display_name.lower(), desc_part.lower())
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            if desc_part:
+                lines.append(f"- {display_name}｜{desc_part}")
+            else:
+                lines.append(f"- {display_name}")
+
+        return "\n".join(lines) if lines else "- 無已確認資料"
 
     def _format_modes(self, modes):
         mapping = {"ship": "船挖", "roc": "ROC", "hand": "手挖", "cave": "洞穴"}
@@ -1002,6 +2791,10 @@ class OverlayApp(tk.Tk):
             return
 
     def _on_close(self):
+        try:
+            self._close_update_dialog()
+        except Exception:
+            pass
         try:
             self._save_settings()
         finally:
