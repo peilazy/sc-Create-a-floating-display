@@ -211,18 +211,22 @@ function sequenceRatio(a, b) {
   }
   return matches / Math.max(a.length, b.length);
 }
+function computeTermScore(query, candidate, exact = 1, starts = 0.95, contains = 0.86, fuzzyScale = 0.72) {
+  const q = norm(query);
+  const cand = norm(candidate);
+  if (!q || !cand) return 0;
+  if (q === cand) return exact;
+  if (cand.startsWith(q)) return starts;
+  if (q.length >= 2 && cand.includes(q)) return contains;
+  const ratio = sequenceRatio(q, cand);
+  const threshold = q.length <= 2 ? 0.9 : 0.76;
+  return ratio >= threshold ? ratio * fuzzyScale : 0;
+}
 function resourceSuggestScore(q, item) {
   let best = 0;
   for (const cand of item.aliases || []) {
     if (!cand) continue;
-    if (q === cand) best = Math.max(best, 1.0);
-    else if (cand.startsWith(q)) best = Math.max(best, 0.97);
-    else if (q.length >= 2 && cand.includes(q)) best = Math.max(best, 0.90);
-    else {
-      const ratio = sequenceRatio(q, cand);
-      const threshold = q.length <= 3 ? 0.86 : 0.74;
-      if (ratio >= threshold) best = Math.max(best, ratio * 0.82);
-    }
+    best = Math.max(best, computeTermScore(q, cand, 1.0, 0.97, 0.90, 0.82));
   }
   return best;
 }
@@ -362,16 +366,12 @@ function findResourceCandidates(query, limit = 8) {
   for (const item of state.resources) {
     let score = 0;
     for (const alias of resourceAliases(item)) {
-      const cand = norm(alias);
-      if (!cand) continue;
-      if (q === cand) score = Math.max(score, 1.0);
-      else if (cand.startsWith(q)) score = Math.max(score, 0.97);
-      else if (q.length >= 2 && cand.includes(q)) score = Math.max(score, 0.9);
+      score = Math.max(score, computeTermScore(q, alias, 1.0, 0.97, 0.9, 0.72));
     }
-    if (score > 0) scored.push([score, item]);
+    if (score > 0) scored.push({ score, item });
   }
-  scored.sort((a,b)=>b[0]-a[0]);
-  return scored.slice(0, limit).map(([, item]) => item);
+  scored.sort((a,b)=>b.score-a.score);
+  return scored.slice(0, limit);
 }
 function findItemCandidates(query, limit = 8) {
   const q = norm(query);
@@ -381,35 +381,30 @@ function findItemCandidates(query, limit = 8) {
     const terms = dedupe([item.name_en, item.name_zh_tw || item.name_zh, item.name_zh, ...(item.search_terms || [])]);
     let score = 0;
     for (const term of terms) {
-      const cand = norm(term);
-      if (!cand) continue;
-      if (q === cand) score = Math.max(score, 1.0);
-      else if (cand.startsWith(q)) score = Math.max(score, 0.94);
-      else if (q.length >= 2 && cand.includes(q)) score = Math.max(score, 0.84);
+      score = Math.max(score, computeTermScore(q, term, 1.0, 0.94, 0.84, 0.7));
     }
-    if (score > 0) scored.push([score, item]);
+    if (score > 0) scored.push({ score, item });
   }
-  scored.sort((a,b)=>b[0]-a[0]);
-  return scored.slice(0, limit).map(([, item]) => item);
+  scored.sort((a,b)=>b.score-a.score);
+  return scored.slice(0, limit);
 }
 function findFacilityCandidates(query, limit = 8) {
   const q = norm(query);
   if (!q) return [];
+  if (isFacilityListQuery(q)) {
+    return state.facilities.slice(0, limit).map((item) => ({ score: 1, item }));
+  }
   const scored = [];
   for (const f of state.facilities) {
-    const terms = dedupe([f.name_en, f.name_zh_tw, f.body, f.system, ...(f.aliases || [])]);
+    const terms = dedupe([f.name_en, f.name_zh_tw, f.body, f.system, f.id, ...(f.aliases || [])]);
     let score = 0;
     for (const term of terms) {
-      const cand = norm(term);
-      if (!cand) continue;
-      if (q === cand) score = Math.max(score, 1.0);
-      else if (cand.startsWith(q)) score = Math.max(score, 0.96);
-      else if (q.length >= 2 && cand.includes(q)) score = Math.max(score, 0.88);
+      score = Math.max(score, computeTermScore(q, term, 1.0, 0.96, 0.88, 0.72));
     }
-    if (score > 0) scored.push([score, f]);
+    if (score > 0) scored.push({ score, item: f });
   }
-  scored.sort((a,b)=>b[0]-a[0]);
-  return scored.slice(0, limit).map(([, item]) => item);
+  scored.sort((a,b)=>b.score-a.score);
+  return scored.slice(0, limit);
 }
 
 function buildSuggestions(query) {
@@ -436,21 +431,23 @@ function buildSuggestions(query) {
     }
   }
   if (filterKindAllowed('facility')) {
-    for (const item of findFacilityCandidates(q, 8)) {
+    for (const cand of findFacilityCandidates(q, 8)) {
+      const item = cand.item;
       const display = bilingual(item.name_en, item.name_zh_tw);
       const key = `facility|${display}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ kind:'facility', display, query: item.name_zh_tw || item.name_en, meta: `${item.system || '-'}｜${item.body || '-'}`, facility_item:item, _score:0.96 });
+      out.push({ kind:'facility', display, query: item.name_zh_tw || item.name_en, meta: `${item.system || '-'}｜${item.body || '-'}`, facility_item:item, _score:cand.score });
     }
   }
   if (filterKindAllowed('item')) {
-    for (const item of findItemCandidates(q, 8)) {
+    for (const cand of findItemCandidates(q, 8)) {
+      const item = cand.item;
       const display = bilingual(item.name_en, item.name_zh_tw || item.name_zh);
       const key = `item|${display}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ kind:'item', display, query: item.name_zh_tw || item.name_zh || item.name_en, meta: item.category_zh_tw || item.category_zh || item.category_en || '圖紙', scc_item:item, _score:0.94 });
+      out.push({ kind:'item', display, query: item.name_zh_tw || item.name_zh || item.name_en, meta: item.category_zh_tw || item.category_zh || item.category_en || '圖紙', scc_item:item, _score:cand.score });
     }
   }
   if (filterKindAllowed('body')) {
@@ -697,10 +694,15 @@ function renderResults() {
   els.resultMeta.textContent = `預設收合｜${state.resultRows.length} 筆`;
   state.resultRows.forEach((row, idx) => {
     const key = rowKey(row);
+    const kindLabel = row.kind === 'facility' ? '設施'
+      : row.kind === 'scc_item' ? '圖紙'
+      : row.kind === 'resource_summary' ? '礦物'
+      : row.kind === 'location' ? '位置'
+      : '地點';
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = `result-item${(state.selectedResultKey ? state.selectedResultKey === key : idx === 0) ? ' active' : ''}`;
-    btn.innerHTML = `<div class="result-title">${esc(row.title || '-')}</div><div class="result-sub">${esc(row.subtitle || row.mode || row.source || '')}</div>`;
+    btn.innerHTML = `<div class="result-head"><span class="result-kind">${esc(kindLabel)}</span></div><div class="result-title">${esc(row.title || '-')}</div><div class="result-sub">${esc(row.subtitle || row.mode || row.source || '')}</div>`;
     btn.addEventListener('click', () => {
       selectRelatedRow(row);
     });
@@ -1423,6 +1425,11 @@ function isBlueprintListQuery(query) {
   if (!q) return false;
   return ['圖紙', '藍圖', '製作圖紙', '全部圖紙', '所有圖紙', 'blueprint', 'blueprints', 'crafting', '製作'].includes(q);
 }
+function isFacilityListQuery(query) {
+  const q = norm(query).replace(/\s+/g, '');
+  if (!q) return false;
+  return ['設施', '全部設施', '所有設施', 'facility', 'facilities'].includes(q);
+}
 
 function showAllBlueprintResults() {
   clearExecTimerTicker();
@@ -1452,6 +1459,38 @@ function showAllBlueprintResults() {
   } else {
     renderWaiting('目前沒有載入任何圖紙資料。');
     setStatus('圖紙資料為空');
+  }
+}
+
+function showAllFacilityResults() {
+  clearExecTimerTicker();
+  state.currentBodyId = null;
+  state.selectedResource = null;
+  state.selectedItem = null;
+  state.selectedFacility = null;
+  const rows = (state.facilities || []).slice().sort((a, b) => {
+    const sa = String(a.system || '');
+    const sb = String(b.system || '');
+    const na = String(a.name_zh_tw || a.name_en || '');
+    const nb = String(b.name_zh_tw || b.name_en || '');
+    return sa.localeCompare(sb, 'zh-Hant') || na.localeCompare(nb, 'zh-Hant');
+  }).map((facility) => ({
+    kind: 'facility',
+    facility_id: facility.id,
+    title: bilingual(facility.name_en, facility.name_zh_tw),
+    subtitle: `${facility.system || '-'}｜${facility.body || '-'}`,
+    facility,
+  }));
+  state.resultRows = rows;
+  state.selectedResultKey = '';
+  renderResults();
+  if (rows.length) {
+    const first = rows[0];
+    showFacilityDetail(first.facility, rowKey(first));
+    setStatus(`已列出全部設施 ${rows.length} 筆`);
+  } else {
+    renderWaiting('目前沒有載入任何設施資料。');
+    setStatus('設施資料為空');
   }
 }
 
@@ -1533,12 +1572,16 @@ function runSearch() {
     showAllBlueprintResults();
     return;
   }
+  if (isFacilityListQuery(query)) {
+    showAllFacilityResults();
+    return;
+  }
   const resourceCandidates = filterKindAllowed('resource') ? findResourceCandidates(query, 10) : [];
   const itemCandidates = filterKindAllowed('item') ? findItemCandidates(query, 10) : [];
   let facilityCandidates = filterKindAllowed('facility') ? findFacilityCandidates(query, 10) : [];
   if (isExecutiveHangarQuery(query)) {
     const forcedHangars = getExecutiveHangarFacilities();
-    if (forcedHangars.length) facilityCandidates = forcedHangars;
+    if (forcedHangars.length) facilityCandidates = forcedHangars.map((item) => ({ score: 1.1, item }));
   }
 
   if (state.selectedResource) {
@@ -1564,15 +1607,43 @@ function runSearch() {
   }
 
   if (isExecutiveHangarQuery(query) && facilityCandidates.length) {
-    showFacilityResults(facilityCandidates[0]);
+    showFacilityResults(facilityCandidates[0].item);
     return;
   }
 
   if (resourceCandidates.length || itemCandidates.length || facilityCandidates.length) {
-    state.resultRows = [];
-    renderResults();
-    renderWaiting('請先從上方聯想中選擇正確礦物、設施、圖紙或地點，之後才會顯示關聯資訊。');
-    setStatus(`找到 ${resourceCandidates.length} 個礦物候選、${facilityCandidates.length} 個設施候選、${itemCandidates.length} 個圖紙候選，請先選擇`);
+    const topResource = resourceCandidates[0] || null;
+    const topFacility = facilityCandidates[0] || null;
+    const topItem = itemCandidates[0] || null;
+    const choices = [
+      topResource ? { kind:'resource', score: topResource.score, payload: topResource.item } : null,
+      topFacility ? { kind:'facility', score: topFacility.score, payload: topFacility.item } : null,
+      topItem ? { kind:'item', score: topItem.score, payload: topItem.item } : null,
+    ].filter(Boolean).sort((a, b) => b.score - a.score);
+    const best = choices[0];
+    if (best?.kind === 'resource') {
+      state.selectedResource = best.payload;
+      state.selectedItem = null;
+      state.selectedFacility = null;
+      showResourceResults(best.payload);
+      return;
+    }
+    if (best?.kind === 'facility') {
+      state.selectedResource = null;
+      state.selectedItem = null;
+      state.selectedFacility = best.payload;
+      showFacilityResults(best.payload);
+      return;
+    }
+    if (best?.kind === 'item') {
+      state.selectedResource = null;
+      state.selectedItem = best.payload;
+      state.selectedFacility = null;
+      showItemResults(best.payload);
+      return;
+    }
+    renderWaiting('找到候選資料，請改用更完整關鍵字。');
+    setStatus('找到候選資料，請改用更完整關鍵字');
     return;
   }
 
@@ -1710,6 +1781,19 @@ function bindEvents() {
     queueRunSearch();
   });
   els.refreshBtn.addEventListener('click', () => loadAll(true));
+  document.querySelectorAll('.quick-action-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const query = String(btn.dataset.query || '').trim();
+      if (!query) return;
+      els.query.value = query;
+      state.selectedResource = null;
+      state.selectedItem = null;
+      state.selectedFacility = null;
+      rememberQuery(query);
+      runSearch();
+      scrollDetailIntoView();
+    });
+  });
   document.addEventListener('click', (e) => {
     if (!els.suggestWrap.contains(e.target) && e.target !== els.query) els.suggestWrap.classList.add('hidden');
   });

@@ -47,6 +47,21 @@
         </div>
       </section>
 
+      <section class="quick-start-card" aria-label="新手操作提示">
+        <div class="quick-start-title">第一次來？先這樣用</div>
+        <ol class="quick-start-steps">
+          <li><strong>第 1 步：</strong>先點下方快捷查詢，或直接輸入關鍵字。</li>
+          <li><strong>第 2 步：</strong>左側看關聯結果，點一筆資料。</li>
+          <li><strong>第 3 步：</strong>右側查看地圖、路線、圖紙或設施詳細。</li>
+        </ol>
+        <div class="quick-actions" id="quickActions">
+          <button type="button" class="quick-action-btn" data-query="設施">看全部設施</button>
+          <button type="button" class="quick-action-btn" data-query="圖紙">看全部圖紙</button>
+          <button type="button" class="quick-action-btn" data-query="行政機庫">行政機庫</button>
+          <button type="button" class="quick-action-btn" data-query="Quantanium">熱門礦物 Quantanium</button>
+        </div>
+      </section>
+
       <div class="hint-row">上方聯想先顯示礦物 / 圖紙 / 設施 / 地點；選擇後左邊列出關聯區域，右邊顯示地圖 / 礦點資訊。</div>
 
       <div class="main-stage">
