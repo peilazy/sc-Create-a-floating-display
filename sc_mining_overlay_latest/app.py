@@ -189,7 +189,6 @@ class OverlayApp(tk.Tk):
         self._hangar_timer_source = None
         self._hangar_timer_fetch_started = 0.0
         self._hangar_timer_anchor = time.time()
-        self._selected_facility = None
         self._preview_original_image = None
         self._preview_render_image = None
         self._preview_zoom = 1.0
