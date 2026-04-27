@@ -1,4 +1,4 @@
-{
+﻿{
   "meta": {
     "dataset_name": "星際公民 資料依據",
     "version": "v1.1.2",
@@ -13542,6 +13542,158 @@
         }
       ],
       "known_location_summary": "- Breaker Stations Interior｜尼克斯 / Nyx｜手挖 / FPS 採礦｜出現 75.0%，掃描 3000"
+    },
+    {
+      "name_en": "Carbon",
+      "name_zh_tw": "碳",
+      "aliases": [
+        "Carbon",
+        "碳"
+      ],
+      "type": "resource",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "low",
+      "notes": "中英名：碳 / Carbon\n類型：基礎資源 / resource\n用途：常見基礎材料，可作為部分製作鏈的基礎來源。",
+      "known_locations": [],
+      "known_location_summary": "- 多星系基礎資源，依各地站點與任務池刷新。",
+      "sources": [
+        "dataset supplement"
+      ]
+    },
+    {
+      "name_en": "Nickel",
+      "name_zh_tw": "鎳",
+      "aliases": [
+        "Nickel",
+        "鎳"
+      ],
+      "type": "ore",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "low",
+      "notes": "中英名：鎳 / Nickel\n類型：礦石 / ore\n用途：常見工業礦物。",
+      "known_locations": [],
+      "known_location_summary": "- 常見於小行星帶與一般船挖礦池。",
+      "sources": [
+        "dataset supplement"
+      ]
+    },
+    {
+      "name_en": "Helium",
+      "name_zh_tw": "氦",
+      "aliases": [
+        "Helium",
+        "氦"
+      ],
+      "type": "resource",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "low",
+      "notes": "中英名：氦 / Helium\n類型：氣體資源 / resource\n用途：部分精煉與工業流程參考。",
+      "known_locations": [],
+      "known_location_summary": "- 多星系可見，依站點與玩法不同而變化。",
+      "sources": [
+        "dataset supplement"
+      ]
+    },
+    {
+      "name_en": "Hassium",
+      "name_zh_tw": "𨧀",
+      "aliases": [
+        "Hassium",
+        "𨧀"
+      ],
+      "type": "ore",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "medium",
+      "notes": "中英名：𨧀 / Hassium\n類型：礦石 / ore\n用途：較稀有工業礦物。",
+      "known_locations": [],
+      "known_location_summary": "- 較稀有，通常需搭配高品質礦點搜尋。",
+      "sources": [
+        "dataset supplement"
+      ]
+    },
+    {
+      "name_en": "Gneiss",
+      "name_zh_tw": "片麻岩",
+      "aliases": [
+        "Gneiss",
+        "片麻岩"
+      ],
+      "type": "ore",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "low",
+      "notes": "中英名：片麻岩 / Gneiss\n類型：礦石 / ore。",
+      "known_locations": [],
+      "known_location_summary": "- 常見伴生礦物。",
+      "sources": [
+        "dataset supplement"
+      ]
+    },
+    {
+      "name_en": "Rutile",
+      "name_zh_tw": "金紅石",
+      "aliases": [
+        "Rutile",
+        "金紅石"
+      ],
+      "type": "ore",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "low",
+      "notes": "中英名：金紅石 / Rutile\n類型：礦石 / ore。",
+      "known_locations": [],
+      "known_location_summary": "- 常見伴生礦物。",
+      "sources": [
+        "dataset supplement"
+      ]
+    },
+    {
+      "name_en": "Hematite",
+      "name_zh_tw": "赤鐵礦",
+      "aliases": [
+        "Hematite",
+        "赤鐵礦"
+      ],
+      "type": "ore",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "low",
+      "notes": "中英名：赤鐵礦 / Hematite\n類型：礦石 / ore。",
+      "known_locations": [],
+      "known_location_summary": "- 常見伴生礦物。",
+      "sources": [
+        "dataset supplement"
+      ]
+    },
+    {
+      "name_en": "Felsic",
+      "name_zh_tw": "長英質",
+      "aliases": [
+        "Felsic",
+        "長英質"
+      ],
+      "type": "ore",
+      "mining_modes": [
+        "ship"
+      ],
+      "value_tier": "low",
+      "notes": "中英名：長英質 / Felsic\n類型：礦石 / ore。",
+      "known_locations": [],
+      "known_location_summary": "- 常見於一般礦脈伴生。",
+      "sources": [
+        "dataset supplement"
+      ]
     }
   ],
   "resource_location_index": [

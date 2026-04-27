@@ -109,15 +109,15 @@ class MiningDataStore:
     def __init__(self, json_path: Path) -> None:
         self.json_path = json_path
         self.payload = self._load(json_path)
+        self._sccrafter = self._load_sccrafter_index()
         self._body_name_map = self._build_body_name_map(self.payload)
-        self._mineral_map, self._resource_alias_map = self._build_resource_maps(self.payload)
+        self._mineral_map, self._resource_alias_map = self._build_resource_maps(self.payload, self._sccrafter)
         self._bodies = self._flatten_bodies(self.payload)
         self._by_id = {item["id"]: item for item in self._bodies}
         self._resources_master = self.payload.get("resources_master", [])
         self._ship_asteroid_profiles = self._build_ship_asteroid_profiles(self.payload)
         self._resource_master_index = self._build_resource_master_index()
         self._blueprints = self.payload.get("blueprints", [])
-        self._sccrafter = self._load_sccrafter_index()
         self._scc_items = self._sccrafter.get("items", [])
         self._scc_materials_master = self._sccrafter.get("materials_master", [])
         self._mission_translation_map = self._sccrafter.get("mission_translation_map", {})
@@ -125,7 +125,19 @@ class MiningDataStore:
 
     @staticmethod
     def _load(path: Path) -> dict[str, Any]:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        default_payload = {
+            "systems": [],
+            "resources_master": [],
+            "blueprints": [],
+            "facility_guides": [],
+        }
+        if not path.exists():
+            return default_payload
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            return payload if isinstance(payload, dict) else default_payload
+        except Exception:
+            return default_payload
 
     @staticmethod
     def _flatten_bodies(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -165,7 +177,7 @@ class MiningDataStore:
         return mapping
 
     @staticmethod
-    def _build_resource_maps(payload: dict[str, Any]) -> tuple[dict[str, str], dict[str, list[str]]]:
+    def _build_resource_maps(payload: dict[str, Any], sccrafter: dict[str, Any] | None = None) -> tuple[dict[str, str], dict[str, list[str]]]:
         mineral_map = {
             "quantanium": "量子礦","taranite": "塔拉奈特","bexalite": "貝克斯礦","gold": "黃金","diamond": "鑽石",
             "copper": "銅","tungsten": "鎢","aluminum": "鋁","corundum": "剛玉","titanium": "鈦","borase": "硼石",
@@ -176,21 +188,39 @@ class MiningDataStore:
             "carinite (pure)": "純科力晶","beradom": "貝拉多姆","feynmaline": "熵瞬晶","glacosite": "冰磧棉",
             "jaclium": "賈克利姆","jaclium (ore)": "賈克利姆原礦","saldynium": "薩爾迪銦","saldynium (ore)": "薩爾迪銦原礦",
             "riccite": "鈺石","aslarite": "阿斯拉石","lindinium": "林迪鎳",
+            "carbon": "碳","ice": "冰","tin": "錫","ouratite": "歐拉礦","saldyniumore": "薩爾迪銦原礦",
         }
         alias_map: dict[str, list[str]] = {"iron": ["鐵"], "carinite": ["科力晶"], "carinite (pure)": ["純科力晶"]}
+
+        def add_resource(en_name: str | None, zh_name: str | None, aliases: list[str] | None = None) -> None:
+            en = (en_name or "").strip()
+            zh = (zh_name or "").strip()
+            if not en:
+                return
+            key = en.lower()
+            if zh:
+                mineral_map[key] = zh
+            alias_map.setdefault(key, []).append(en)
+            if zh:
+                alias_map[key].append(zh)
+            for alias in aliases or []:
+                alias_text = str(alias).strip()
+                if alias_text:
+                    alias_map[key].append(alias_text)
+            compact = re.sub(r"[^a-z0-9]+", "", key)
+            if compact and compact != key:
+                alias_map[key].append(compact)
+
         for rm in payload.get("resources_master", []):
-            en = (rm.get("name_en") or "").strip()
-            zh = (rm.get("name_zh_tw") or "").strip()
-            aliases = rm.get("aliases") or []
-            if en and zh:
-                mineral_map[en.lower()] = zh
-            if en:
-                alias_map.setdefault(en.lower(), []).append(en)
-            if en and zh:
-                alias_map.setdefault(en.lower(), []).append(zh)
-            for a in aliases:
-                if en:
-                    alias_map.setdefault(en.lower(), []).append(str(a))
+            add_resource(rm.get("name_en"), rm.get("name_zh_tw"), list(rm.get("aliases") or []))
+
+        sccrafter = sccrafter or {}
+        for mat in sccrafter.get("materials_master", []) or []:
+            add_resource(mat.get("name_en"), mat.get("name_zh_tw"), list(mat.get("aliases") or []))
+        for item in sccrafter.get("items", []) or []:
+            for mat in item.get("materials", []) or []:
+                add_resource(mat.get("name_en"), mat.get("name_zh_tw") or mat.get("name_zh"), [])
+
         for en, zh in mineral_map.items():
             alias_map.setdefault(en, [])
             if zh not in alias_map[en]:
@@ -245,7 +275,16 @@ class MiningDataStore:
     def translate_resource_name(self, name: str | None) -> str | None:
         if not name:
             return None
-        return self._mineral_map.get(name.strip().lower())
+        key = name.strip().lower()
+        direct = self._mineral_map.get(key)
+        if direct:
+            return direct
+        compact = re.sub(r"[^a-z0-9]+", "", key)
+        if compact:
+            for en, zh in self._mineral_map.items():
+                if re.sub(r"[^a-z0-9]+", "", en) == compact:
+                    return zh
+        return None
 
     def bilingual_body(self, body_en: str | None, body_zh: str | None = None) -> str:
         zh = body_zh or self.get_body_zh(body_en)
@@ -495,12 +534,19 @@ class MiningDataStore:
         return "\n".join(lines)
 
     def _load_sccrafter_index(self) -> dict[str, Any]:
-        path = self.json_path.parent / "sccrafter_index.json"
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8-sig"))
-            except Exception:
-                return {}
+        candidates = [
+            self.json_path.parent / "sccrafter_index.json",
+            self.json_path.parent / "data" / "sccrafter_index.json",
+            self.json_path.parent.parent / "data" / "sccrafter_index.json",
+        ]
+        for path in candidates:
+            if path.exists():
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+                    if isinstance(payload, dict):
+                        return payload
+                except Exception:
+                    continue
         return {}
 
     @staticmethod
@@ -522,6 +568,16 @@ class MiningDataStore:
         q = self._norm_key(query)
         if not q:
             return []
+        generic_terms = {"圖紙", "藍圖", "blueprint", "blueprints", "craft", "crafting"}
+        if q in {self._norm_key(x) for x in generic_terms}:
+            items = sorted(
+                self._scc_items,
+                key=lambda x: (
+                    str(x.get("category_zh_tw") or x.get("category_zh") or x.get("category_en") or ""),
+                    str(x.get("name_zh_tw") or x.get("name_zh") or x.get("name_en") or ""),
+                ),
+            )
+            return items[:limit]
         scored = []
         seen = set()
         for item in self._scc_items:
@@ -938,4 +994,3 @@ class MiningDataStore:
         if blueprints:
             return head + "\n\n" + blueprints
         return head
-
