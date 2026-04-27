@@ -1781,6 +1781,19 @@ function bindEvents() {
     queueRunSearch();
   });
   els.refreshBtn.addEventListener('click', () => loadAll(true));
+  document.querySelectorAll('.quick-action-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const query = String(btn.dataset.query || '').trim();
+      if (!query) return;
+      els.query.value = query;
+      state.selectedResource = null;
+      state.selectedItem = null;
+      state.selectedFacility = null;
+      rememberQuery(query);
+      runSearch();
+      scrollDetailIntoView();
+    });
+  });
   document.addEventListener('click', (e) => {
     if (!els.suggestWrap.contains(e.target) && e.target !== els.query) els.suggestWrap.classList.add('hidden');
   });
