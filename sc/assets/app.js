@@ -1423,6 +1423,11 @@ function isBlueprintListQuery(query) {
   if (!q) return false;
   return ['圖紙', '藍圖', '製作圖紙', '全部圖紙', '所有圖紙', 'blueprint', 'blueprints', 'crafting', '製作'].includes(q);
 }
+function isFacilityListQuery(query) {
+  const q = norm(query).replace(/\s+/g, '');
+  if (!q) return false;
+  return ['設施', '全部設施', '所有設施', 'facility', 'facilities'].includes(q);
+}
 
 function showAllBlueprintResults() {
   clearExecTimerTicker();
@@ -1452,6 +1457,38 @@ function showAllBlueprintResults() {
   } else {
     renderWaiting('目前沒有載入任何圖紙資料。');
     setStatus('圖紙資料為空');
+  }
+}
+
+function showAllFacilityResults() {
+  clearExecTimerTicker();
+  state.currentBodyId = null;
+  state.selectedResource = null;
+  state.selectedItem = null;
+  state.selectedFacility = null;
+  const rows = (state.facilities || []).slice().sort((a, b) => {
+    const sa = String(a.system || '');
+    const sb = String(b.system || '');
+    const na = String(a.name_zh_tw || a.name_en || '');
+    const nb = String(b.name_zh_tw || b.name_en || '');
+    return sa.localeCompare(sb, 'zh-Hant') || na.localeCompare(nb, 'zh-Hant');
+  }).map((facility) => ({
+    kind: 'facility',
+    facility_id: facility.id,
+    title: bilingual(facility.name_en, facility.name_zh_tw),
+    subtitle: `${facility.system || '-'}｜${facility.body || '-'}`,
+    facility,
+  }));
+  state.resultRows = rows;
+  state.selectedResultKey = '';
+  renderResults();
+  if (rows.length) {
+    const first = rows[0];
+    showFacilityDetail(first.facility, rowKey(first));
+    setStatus(`已列出全部設施 ${rows.length} 筆`);
+  } else {
+    renderWaiting('目前沒有載入任何設施資料。');
+    setStatus('設施資料為空');
   }
 }
 
@@ -1531,6 +1568,10 @@ function runSearch() {
   }
   if (isBlueprintListQuery(query)) {
     showAllBlueprintResults();
+    return;
+  }
+  if (isFacilityListQuery(query)) {
+    showAllFacilityResults();
     return;
   }
   const resourceCandidates = filterKindAllowed('resource') ? findResourceCandidates(query, 10) : [];
