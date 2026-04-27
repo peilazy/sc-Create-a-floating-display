@@ -189,7 +189,6 @@ class OverlayApp(tk.Tk):
         self._hangar_timer_source = None
         self._hangar_timer_fetch_started = 0.0
         self._hangar_timer_anchor = time.time()
-        self._selected_facility = None
         self._preview_original_image = None
         self._preview_render_image = None
         self._preview_zoom = 1.0
@@ -1072,6 +1071,7 @@ class OverlayApp(tk.Tk):
 
     def _run_search(self):
         query = self.query_var.get().strip()
+        query_key = query.lower()
         self._suggestions = self._build_suggestions(query)
         self._render_suggestions()
 
@@ -1086,7 +1086,9 @@ class OverlayApp(tk.Tk):
             return
 
         resource_candidates = self.store.find_resource_candidates(query, limit=10)
-        item_candidates = self.store.find_item_candidates(query, limit=10)
+        blueprint_keywords = {"圖紙", "藍圖", "blueprint", "blueprints", "craft", "crafting"}
+        item_limit = 200 if query_key in blueprint_keywords else 10
+        item_candidates = self.store.find_item_candidates(query, limit=item_limit)
         facility_limit = 32 if query in {"設施", "facility", "facilities"} else 12
         facility_candidates = self.store.find_facility_candidates(query, limit=facility_limit)
 
@@ -1127,6 +1129,10 @@ class OverlayApp(tk.Tk):
             if forced_hangar:
                 self._show_facility_results(forced_hangar)
                 return
+
+        if query_key in blueprint_keywords and item_candidates:
+            self._show_item_list_results(item_candidates)
+            return
 
         if resource_candidates or item_candidates:
             self._result_rows = []
@@ -1332,6 +1338,24 @@ class OverlayApp(tk.Tk):
         self.status_var.set(f'圖紙【{item.get("name_zh_tw") or item.get("name_zh") or item.get("name_en")}】｜材料 {len(item.get("materials", []))} 項｜任務 {int(item.get("mission_count") or 0)} 筆')
         self._set_risk_banner(None)
         self._set_detail(self.store.scc_item_detail_text(item))
+
+    def _show_item_list_results(self, items):
+        rows = []
+        for item in items:
+            rows.append({
+                "kind": "scc_item",
+                "title": self.store.bilingual_blueprint(item.get("name_en"), item.get("name_zh_tw") or item.get("name_zh")),
+                "subtitle": item.get("category_zh_tw") or item.get("category_zh") or item.get("category_en") or "圖紙",
+                "scc_item": item,
+            })
+        self._result_rows = rows
+        self._render_results()
+        self.status_var.set(f"圖紙結果 {len(rows)} 筆")
+        if rows:
+            self._show_detail_for_result(rows[0])
+        else:
+            self._set_risk_banner(None)
+            self._set_detail("查無圖紙資料")
 
     def _render_results(self):
         self.result_list.delete(0, tk.END)

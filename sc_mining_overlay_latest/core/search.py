@@ -20,6 +20,7 @@ class MiningSearch:
             ]
             mining = body.get("mining", {})
             resource_terms = set()
+            resource_bag_terms: list[str] = []
             for item in body.get("locations", []):
                 bag.append(item)
                 bag.append(self.store.translate_known_text(item))
@@ -29,13 +30,19 @@ class MiningSearch:
                 mining.get("known_asteroid_resources", []),
             ):
                 for item in group:
+                    item_terms: list[str] = []
                     terms = self.store.extract_resource_terms(item)
                     for term in terms:
+                        if term not in item_terms:
+                            item_terms.append(term)
                         resource_terms.add(term)
                         translated = self.store.translate_resource_name(term)
                         if translated:
+                            if translated not in item_terms:
+                                item_terms.append(translated)
                             resource_terms.add(translated)
-                    bag.extend(list(resource_terms))
+                    resource_bag_terms.extend(item_terms)
+            bag.extend(resource_bag_terms)
             blob = " ".join(filter(None, bag)).lower()
             rows.append({
                 "id": body["id"],
