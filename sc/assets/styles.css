@@ -68,6 +68,8 @@ body{overflow-x:hidden}
 .result-list{display:flex;flex-direction:column;gap:8px}
 .result-item{appearance:none;border:1px solid var(--line);background:var(--bg2);color:var(--text);text-align:left;border-radius:12px;padding:12px}
 .result-item.active,.result-item:hover{background:#153041;border-color:#4a86a5}
+.result-head{display:flex;justify-content:flex-start;align-items:center;margin-bottom:6px}
+.result-kind{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;border:1px solid #3f6f88;background:#143141;color:#9edbff;font-size:11px;letter-spacing:.02em}
 .result-title{font-size:14px;font-weight:700;line-height:1.35}
 .result-sub{margin-top:4px;font-size:12px;color:var(--muted);line-height:1.45}
 .risk-banner{margin:10px 12px 0;padding:8px 10px;border-radius:10px;background:#23465a;color:#e6fbff;font-size:14px;font-weight:700}
