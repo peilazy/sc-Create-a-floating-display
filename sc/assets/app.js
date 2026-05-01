@@ -31,6 +31,7 @@ const state = {
 const els = {
   query: document.getElementById('queryInput'),
   clearBtn: document.getElementById('clearBtn'),
+  focusDetailBtn: document.getElementById('focusDetailBtn'),
   refreshBtn: document.getElementById('refreshBtn'),
   statusBar: document.getElementById('statusBar'),
   miningState: document.getElementById('miningState'),
@@ -492,7 +493,7 @@ function renderSuggestions() {
   });
 }
 function setStatus(text) {
-  els.statusBar.textContent = text || '—';
+  els.statusBar.innerHTML = text ? `<strong>狀態：</strong>${esc(text)}` : '—';
 }
 function setRiskBanner(body) {
   if (!body) {
@@ -1770,7 +1771,15 @@ function bindEvents() {
       if (state.suggestions.length) applySuggestion(suggestIndex);
       else if (state.resultRows.length) selectRelatedRow(state.resultRows[0]);
     } else if (e.key === 'Escape') {
-      els.suggestWrap.classList.add('hidden');
+      if (els.query.value.trim()) {
+        els.query.value = '';
+        state.selectedResource = null;
+        state.selectedItem = null;
+        state.selectedFacility = null;
+        queueRunSearch();
+      } else {
+        els.suggestWrap.classList.add('hidden');
+      }
     }
   });
   els.clearBtn.addEventListener('click', () => {
@@ -1781,6 +1790,12 @@ function bindEvents() {
     queueRunSearch();
   });
   els.refreshBtn.addEventListener('click', () => loadAll(true));
+  if (els.focusDetailBtn) {
+    els.focusDetailBtn.addEventListener('click', () => {
+      const panel = document.querySelector('.detail-panel');
+      if (panel) panel.scrollIntoView({ behavior:'smooth', block:'start' });
+    });
+  }
   document.addEventListener('click', (e) => {
     if (!els.suggestWrap.contains(e.target) && e.target !== els.query) els.suggestWrap.classList.add('hidden');
   });
