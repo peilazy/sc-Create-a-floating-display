@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>SC 採礦 / 製作查詢</title>
-  <link rel="stylesheet" href="assets/styles.css?v=appstyle4-mobilepc">
+  <link rel="stylesheet" href="assets/styles.css?v=fresh-layout-v1">
 </head>
 <body>
   <div class="app-shell">
@@ -35,14 +35,19 @@
         <span id="miningState" class="chip">採礦：待載入</span>
         <span id="craftingState" class="chip">圖紙：待載入</span>
       </div>
-      <div class="helper-text">Enter 套用聯想、↑↓ 切換、Esc 清空/收合，資料來源失敗時會回退快取。</div>
+      <div class="helper-text">Enter 套用聯想、↑↓ 切換、Esc 清空/收合；手機可收合欄位避免擁擠。</div>
+      <div class="view-switch" role="group" aria-label="版面顯示模式">
+        <button id="toggleFiltersBtn" class="btn btn-ghost" type="button">收合篩選</button>
+        <button id="toggleResultsBtn" class="btn btn-ghost" type="button">收合結果</button>
+        <button id="toggleDetailBtn" class="btn btn-ghost" type="button">收合詳細</button>
+      </div>
       <div id="suggestWrap" class="suggest-frame hidden" aria-live="polite">
         <div class="suggest-head">聯想結果</div>
         <div id="suggestions" class="suggest-list"></div>
       </div>
     </section>
 
-    <main class="workspace">
+    <main class="workspace" id="workspace">
       <aside class="panel left-panel">
         <div class="panel-head">
           <div>
@@ -83,6 +88,7 @@
     </footer>
   </div>
 
-  <script src="assets/app.js?v=appstyle4-mobilepc"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
+  <script src="assets/app.js?v=fresh-layout-v1"></script>
 </body>
 </html>
