@@ -33,6 +33,9 @@ const els = {
   clearBtn: document.getElementById('clearBtn'),
   focusDetailBtn: document.getElementById('focusDetailBtn'),
   refreshBtn: document.getElementById('refreshBtn'),
+  toggleFiltersBtn: document.getElementById('toggleFiltersBtn'),
+  toggleResultsBtn: document.getElementById('toggleResultsBtn'),
+  toggleDetailBtn: document.getElementById('toggleDetailBtn'),
   statusBar: document.getElementById('statusBar'),
   miningState: document.getElementById('miningState'),
   craftingState: document.getElementById('craftingState'),
@@ -1809,9 +1812,34 @@ function bindEvents() {
   });
 }
 
+
+function updateLayoutClock() {
+  if (!els.versionBadge) return;
+  const now = (window.dayjs ? window.dayjs().format('MM/DD HH:mm') : new Date().toLocaleString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}));
+  if (!els.versionBadge.dataset.base) els.versionBadge.dataset.base = els.versionBadge.textContent || '';
+  els.versionBadge.textContent = `${els.versionBadge.dataset.base} · ${now}`;
+}
+
+function bindLayoutToggles() {
+  const searchCard = document.querySelector('.search-card');
+  const leftPanel = document.querySelector('.left-panel');
+  const detailPanel = document.querySelector('.detail-panel');
+  els.toggleFiltersBtn?.addEventListener('click', () => {
+    searchCard?.classList.toggle('is-collapsed');
+  });
+  els.toggleResultsBtn?.addEventListener('click', () => {
+    leftPanel?.classList.toggle('is-collapsed');
+  });
+  els.toggleDetailBtn?.addEventListener('click', () => {
+    detailPanel?.classList.toggle('is-collapsed');
+  });
+}
 window.addEventListener('DOMContentLoaded', () => {
   state.recentQueries = loadRecent();
   bindEvents();
+  bindLayoutToggles();
+  updateLayoutClock();
+  setInterval(updateLayoutClock, 60000);
   renderResults();
   renderWaiting('可從最近紀錄、礦物、設施、圖紙或地點聯想中選擇。');
   loadAll(false);
