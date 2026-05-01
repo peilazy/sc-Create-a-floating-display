@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>SC 採礦 / 製作查詢</title>
-  <link rel="stylesheet" href="assets/styles.css?v=fresh-layout-v1">
+  <link rel="stylesheet" href="assets/styles.css?v=fresh-layout-v2">
 </head>
 <body>
   <div class="app-shell">
@@ -89,6 +89,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
-  <script src="assets/app.js?v=fresh-layout-v1"></script>
+  <script src="assets/app.js?v=fresh-layout-v2"></script>
 </body>
 </html>

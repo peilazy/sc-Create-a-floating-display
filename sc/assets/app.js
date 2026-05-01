@@ -674,6 +674,28 @@ function locationOverviewHtml(row, resourceItem = null) {
   return overviewCard('基本資訊', '', extras.join(''));
 }
 
+
+function relationshipTreeHtml(centerTitle, groups = []) {
+  const validGroups = (groups || []).filter((g) => (g.items || []).length);
+  if (!validGroups.length) return '';
+  return `
+    <section class="overview-card relation-tree-card">
+      <div class="overview-heading">關聯樹狀圖（卡片）</div>
+      <div class="relation-tree-scroll" role="region" aria-label="關聯樹狀圖，可橫向捲動">
+        <div class="relation-tree-canvas">
+          <div class="tree-node tree-root">${esc(centerTitle || '目前目標')}</div>
+          ${validGroups.map((group) => `
+            <div class="tree-branch">
+              <div class="tree-branch-title">${esc(group.title || '關聯')}</div>
+              <div class="tree-node-row">
+                ${(group.items || []).slice(0, 10).map((item) => `<div class="tree-node">${esc(item)}</div>`).join('')}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </section>`;
+}
 function updateSourceState(miningMeta = {}, craftingMeta = {}) {
   if (els.miningState) {
     const miningState = miningMeta.state || 'cache';
@@ -954,7 +976,8 @@ function showBodyDetail(bodyId, resourceItem = null, key = '') {
   }
   state.selectedResultKey = key;
   renderResults();
-  renderDetail({ title:bilingual(body.name_en, body.name_zh), meta: body.system_zh || body.system || '地點資訊', body, overviewHtml: bodyOverviewHtml(body, resourceItem), sections });
+  const relationHtml = relationshipTreeHtml(bilingual(body.name_en, body.name_zh), [{ title:'可採礦類型', items: bodyMiningBuckets(body, null).filter((g)=>g.values.length).map((g)=>`${g.title}（${g.values.length}）`) }, { title:'常見點位', items: (body.locations || []).slice(0,6) }]);
+  renderDetail({ title:bilingual(body.name_en, body.name_zh), meta: body.system_zh || body.system || '地點資訊', body, overviewHtml: relationHtml + bodyOverviewHtml(body, resourceItem), sections });
 }
 
 
@@ -1239,7 +1262,8 @@ async function showFacilityDetail(facility, key = '') {
   state.selectedResultKey = key;
   renderResults();
   clearExecTimerTicker();
-  renderDetail({ title:bilingual(facility.name_en, facility.name_zh_tw), meta:`${facility.system || '-'}｜${facility.body || '-'}`, overviewHtml: facilityOverviewHtml(facility), sections: facilitySections(facility) });
+  const relationHtml = relationshipTreeHtml(bilingual(facility.name_en, facility.name_zh_tw), [{ title:'設施群組', items: facilityGroupRows(facility).map((row)=>row.title) }, { title:'卡片位置', items:(facility.card_locations || []).slice(0,6) }]);
+  renderDetail({ title:bilingual(facility.name_en, facility.name_zh_tw), meta:`${facility.system || '-'}｜${facility.body || '-'}`, overviewHtml: relationHtml + facilityOverviewHtml(facility), sections: facilitySections(facility) });
   if (facility.id === 'facility_executive_hangars') {
     setStatus('行政機庫倒數已嵌入原站即時區塊');
   }
@@ -1277,7 +1301,8 @@ function showResourceSummary(resourceItem, key = '') {
   clearExecTimerTicker();
   state.selectedResultKey = key;
   renderResults();
-  renderDetail({ title:bilingual(resourceItem.name_en, resourceItem.name_zh_tw), meta:'礦物資訊', overviewHtml: resourceOverviewHtml(resourceItem), sections: resourceSummarySections(resourceItem, true) });
+  const relationHtml = relationshipTreeHtml(bilingual(resourceItem.name_en, resourceItem.name_zh_tw), [{ title:'常見地點', items:(resourceItem.known_locations || []).slice(0,8).map((loc)=>`${loc.body || '-'}｜${normalizeMode(loc.mode)}`) }, { title:'可製作圖紙', items:resourceBlueprints(resourceItem, 8).map((bp)=>bilingual(bp.name_en, bp.name_zh_tw || bp.name_zh)) }]);
+    renderDetail({ title:bilingual(resourceItem.name_en, resourceItem.name_zh_tw), meta:'礦物資訊', overviewHtml: relationHtml + resourceOverviewHtml(resourceItem), sections: resourceSummarySections(resourceItem, true) });
   setStatus(`礦物【${resourceItem.name_zh_tw || resourceItem.name_en}】資訊`);
 }
 function showItemDetail(item, key = '') {
@@ -1289,7 +1314,7 @@ function showItemDetail(item, key = '') {
   renderDetail({
     title:bilingual(item.name_en, item.name_zh_tw || item.name_zh),
     meta:item.category_zh_tw || item.category_zh || item.category_en || '圖紙',
-    overviewHtml: itemOverviewHtml(item),
+    overviewHtml: relationshipTreeHtml(bilingual(item.name_en, item.name_zh_tw || item.name_zh), [{ title:'材料', items:(item.materials || []).slice(0,8).map((mat)=>`${bilingual(mat.name_en, mat.name_zh_tw || mat.name_zh)} ×${Number(mat.quantity || 1)}`) }, { title:'獲取任務', items:(item.missions || []).slice(0,8).map((m)=>m.name_zh_tw || m.name_zh || m.name_en || '-') }]) + itemOverviewHtml(item),
     sections:[
       { title:'材料', html:listRows(materials), open:true },
       { title:'獲取任務', html:listRows(missions), open:false },
@@ -1522,7 +1547,8 @@ function showResourceResults(resourceItem) {
     if (first.body_id) showBodyDetail(first.body_id, resourceItem, rowKey(first));
     else showDetailForResult(first, resourceItem, rowKey(first));
   } else {
-    renderDetail({ title:bilingual(resourceItem.name_en, resourceItem.name_zh_tw), meta:'礦物資訊', overviewHtml: resourceOverviewHtml(resourceItem), sections: resourceSummarySections(resourceItem, true) });
+    const relationHtml = relationshipTreeHtml(bilingual(resourceItem.name_en, resourceItem.name_zh_tw), [{ title:'常見地點', items:(resourceItem.known_locations || []).slice(0,8).map((loc)=>`${loc.body || '-'}｜${normalizeMode(loc.mode)}`) }, { title:'可製作圖紙', items:resourceBlueprints(resourceItem, 8).map((bp)=>bilingual(bp.name_en, bp.name_zh_tw || bp.name_zh)) }]);
+    renderDetail({ title:bilingual(resourceItem.name_en, resourceItem.name_zh_tw), meta:'礦物資訊', overviewHtml: relationHtml + resourceOverviewHtml(resourceItem), sections: resourceSummarySections(resourceItem, true) });
   }
 }
 function showFacilityResults(facility) {
